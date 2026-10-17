@@ -6,6 +6,8 @@
 #include <unistd.h>
 #include <time.h>
 #include <pthread.h>
+#include <errno.h>
+#include <sys/mount.h>
 #include <linux/input.h>
 #include <tinyalsa/asoundlib.h>
 
@@ -116,3 +118,60 @@ int hw_charging(void) {
     return !strncmp(s, "Charging", 8) || !strncmp(s, "Full", 4);
 }
 int hw_headset(void) { return read_int("/sys/class/switch/headset/state", 0) != 0; }
+
+// ---------- accelerometer ----------
+// The kx126 driver's event stream is unusable here (it waits for a data-ready interrupt that never
+// fires, and its polled path only reports an X-axis flip). Its debug hook still reads any register:
+// writing an address to reg_read logs "kx126_sysfs_reg_read reg 0x9 val 0xe2" through dynamic debug,
+// which we pick up from /dev/kmsg. We read only the high bytes of X/Y/Z (about 32 per g at +-4 g).
+#define ACC_SYS "/sys/class/input/input2"
+#define DYNDBG "/sys/kernel/debug/dynamic_debug/control"
+static int acc_on, acc_kmsg = -1, acc_hi[3], acc_got, acc_have;
+
+static void write_str(const char *path, const char *v) { FILE *f = fopen(path, "w"); if (f) { fputs(v, f); fclose(f); } }
+
+void hw_accel_enable(int on) {
+    on = !!on;
+    if (on == acc_on) return;
+    if (on) {
+        if (access(DYNDBG, W_OK)) mount("none", "/sys/kernel/debug", "debugfs", 0, NULL);
+        write_str(DYNDBG, "func kx126_sysfs_reg_read +p");
+        write_int(ACC_SYS "/delay", 100);
+        write_int(ACC_SYS "/enable", 1);
+        acc_kmsg = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
+        if (acc_kmsg >= 0) lseek(acc_kmsg, 0, SEEK_END);
+    } else {
+        write_int(ACC_SYS "/enable", 0);
+        write_str(DYNDBG, "func kx126_sysfs_reg_read -p");
+        if (acc_kmsg >= 0) close(acc_kmsg);
+        acc_kmsg = -1;
+    }
+    acc_on = on; acc_have = 0;
+}
+
+void hw_accel_sample(void) {
+    if (!acc_on || acc_kmsg < 0) return;
+    static const char *regs[3] = { "0x09", "0x0b", "0x0d" };   // XOUT_H, YOUT_H, ZOUT_H
+    for (int i = 0; i < 3; i++) write_str(ACC_SYS "/reg_read", regs[i]);
+    char rec[512]; int n;
+    acc_got = 0;
+    while ((n = read(acc_kmsg, rec, sizeof rec - 1)) != 0) {
+        if (n < 0) { if (errno == EPIPE) continue; break; }   // EPIPE: records were overwritten
+        rec[n] = 0;
+        char *m = strstr(rec, "kx126_sysfs_reg_read reg "); unsigned reg, val;
+        if (!m || sscanf(m, "kx126_sysfs_reg_read reg %x val %x", &reg, &val) != 2) continue;
+        int v = (signed char)val;
+        if (reg == 0x09) { acc_hi[0] = v; acc_got |= 1; }
+        else if (reg == 0x0b) { acc_hi[1] = v; acc_got |= 2; }
+        else if (reg == 0x0d) { acc_hi[2] = v; acc_got |= 4; }
+    }
+    if (acc_got == 7) acc_have = 1;
+}
+
+// Measured on the device: held upright, gravity reads chip -X; turned left (top edge left, so the
+// left edge is down), chip -Y.
+int hw_accel_gravity(int *gx, int *gy, int *gz) {
+    if (!acc_have) return 0;
+    *gx = acc_hi[1]; *gy = -acc_hi[0]; *gz = acc_hi[2];
+    return 1;
+}

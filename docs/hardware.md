@@ -27,6 +27,17 @@ Verified on the device on 2026-10-16 with stock firmware 1.1 and the ap80dev hoo
 | kx126 accel / step detector / step counter | event2–4 | |
 - Headset jack: `/sys/class/switch/headset/state`.
 
+## Accelerometer — kx126 on i2c-2 @ 0x1e
+- `/sys/class/input/input2/{enable,delay}` switch it on, but **event2 delivers nothing useful**: the
+  data-ready interrupt (GPIO 54) never fires, and the polled path (delay = 5 ms) only reports when X
+  crosses a threshold. `orientation_status` is just that X-flip flag.
+- The chip works (WHO_AM_I 0x11 = 0x38). Read registers through the driver's debug hook:
+  `echo "func kx126_sysfs_reg_read +p" > /sys/kernel/debug/dynamic_debug/control`, then
+  `echo 0x09 > /sys/class/input/input2/reg_read` logs `kx126_sysfs_reg_read reg 0x9 val 0xe2`.
+- XOUT/YOUT/ZOUT = 0x08..0x0D (16-bit LE, ±4 g, ~8192 per g; high bytes ~32 per g).
+- Axes: held upright, gravity reads chip −X. Turned with the top edge to the left (left edge down),
+  it reads chip −Y. So screen +x (toward the right edge) = chip +Y and screen +y (down) = chip −X.
+
 ## Audio — ALSA card 0 "ap80pro" (ES9218/9219 driver)
 - PCM `hw:0,0`: S16_LE / S24_LE, 8 k–384 kHz, 1–2 channels.
 - Mixer controls: `Left/Right Playback Volume` (0–255), `Digital Filter` (0–7), `Hardware Mute`, `DOP_EN`, `isDSD`, `Output Port Switch` (0–6).

@@ -24,3 +24,4 @@ scratch_test/
 
 .DS_Store
 ._*
+app/acctest/acctest

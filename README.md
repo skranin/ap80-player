@@ -12,16 +12,20 @@ a whole folder. There is no Bluetooth, e-book reader, step counter or album art.
 > Make a full NAND backup first.
 
 ## What it does
+- **Layout:** a status line on top, the selected page in the middle, and a tray at the bottom with
+  big Player / Library / Settings buttons. Large type for readability.
+- **Orientation:** portrait or landscape, either way up. Auto-rotate (phone-style) or a fixed
+  orientation picked in Settings.
 - **Library:** a folder browser for the SD card. Tap a song to play it and the rest of its folder;
   "Play all" plays the folder recursively.
 - **Player:** title, artist and album from FLAC/MP3/WAV tags, plus format, a seek bar,
-  prev/play/next, and links to the library and settings.
+  prev/play/next.
 - **Resume:** on boot it opens the player paused at the last position, or the library if nothing
   was played before.
 - **Hardware controls:** play/pause, next/prev, the volume knob, and power (short press = screen,
   long press = power off).
-- **Settings:** brightness, screen-off timeout, DAC filter, max volume, start paused or resume,
-  switch to the stock player, power off.
+- **Settings:** brightness, screen-off timeout, auto-rotate, orientation, max volume, DAC filter,
+  start paused or resume, switch to the stock player, power off.
 - **USB storage mode:** exports the SD card to a computer so music can be copied over.
 
 ## How it runs on the device
@@ -41,12 +45,13 @@ included in this repo.
 | Path | Contents |
 |---|---|
 | `app/player` | The player: C, framebuffer UI, tinyalsa output, dr_flac/dr_mp3/dr_wav decoders, stb_truetype text |
-| `app/fbtest`, `app/hello` | Early hardware experiments |
+| `app/fbtest`, `app/hello`, `app/acctest` | Hardware experiments |
 | `sdcard/ap80dev` | Files that go on the SD card (`boot.sh`, flag files) |
 | `firmware/mod/overlay` | The one file changed in the stock rootfs |
 | `tools/Dockerfile` | Cross toolchain image `ap80-tc` (Debian, mipsel gcc, UBI/ISO tools, qemu) |
 | `tools/scripts` | Firmware unpack/repack (`roundtrip.sh`, `build_upt.sh`, `verify.sh`) and qemu helpers |
 | `tools/deploy.sh`, `tools/shot.sh` | Build + push + restart over ADB; take a screenshot |
+| `tools/scripts/preview.sh` | Headless UI preview under qemu (portrait + landscape screenshots) |
 | `docs/hardware.md` | Hardware notes: display ioctls, inputs, ALSA controls, USB gadget, pitfalls |
 | `docs/stock_features.md` | Inventory of stock firmware features |
 | `screenshots` | UI screenshots |
@@ -74,6 +79,8 @@ While the app runs it reads commands from `/tmp/ap80p.cmd` on the device:
 - Volume is an attenuation scale: 0 is loudest and 255 is mute.
 - Don't put the LCD controller to sleep (`SET_SLEEP` 1): it can hang the display driver. The app
   only turns the backlight off.
+- The kx126 accelerometer driver's event stream doesn't work; auto-rotate reads the chip's registers
+  through the driver's `reg_read` debug hook and dynamic debug (`/dev/kmsg`). See `docs/hardware.md`.
 - Avoid hard resets while the SD card is mounted. One unclean reset wiped the `ap80dev` folder.
 - To return to stock, remove `ap80dev/no_stock`, or flash the stock or rollback `.upt`.
 

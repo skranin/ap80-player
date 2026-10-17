@@ -21,3 +21,10 @@ void hw_set_brightness(int b);             // 0..255
 int hw_battery(void);                      // percent, or -1
 int hw_charging(void);
 int hw_headset(void);                      // 1 if headphones are plugged in
+
+// KX126 accelerometer. Off by default to save power.
+void hw_accel_enable(int on);
+void hw_accel_sample(void);                // takes a reading (a few ms); call a few times a second
+// Gravity in portrait screen axes: +x = toward the right edge, +y = toward the bottom; ~32 per g.
+// Returns 0 until a reading has arrived.
+int hw_accel_gravity(int *gx, int *gy, int *gz);

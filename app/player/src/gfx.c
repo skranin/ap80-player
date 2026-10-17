@@ -19,6 +19,7 @@
 
 static uint32_t back[SCR_W * SCR_H];
 static uint32_t *fbmem; static size_t fblen; static int fbfd = -1;
+int gfx_w = SCR_W, gfx_h = SCR_H; static int rot;
 static int clip_x0, clip_y0, clip_x1 = SCR_W, clip_y1 = SCR_H;
 
 // ---------- framebuffer ----------
@@ -33,43 +34,70 @@ void gfx_present(void) {
     size_t frame = (size_t)SCR_W * SCR_H;
     if (idx < 0 || (idx + 1) * frame * 4 > fblen) idx = 0;
     uint32_t *dst = fbmem + idx * frame;
-    // Panel scans 480-px lines top->bottom; the first line is the right edge.
-    for (int x = 0; x < SCR_W; x++) {
-        uint32_t *col = dst + (SCR_W - 1 - x) * SCR_H;
-        const uint32_t *src = back + x;
-        for (int y = 0; y < SCR_H; y++) col[y] = src[y * SCR_W];
+    // The panel is landscape: 360 lines of 480 px. Portrait pixel (px, py) lives at fb[(359 - px) * 480 + py].
+    switch (rot) {
+    case ROT_PORTRAIT:       // px = x, py = y
+        for (int x = 0; x < SCR_W; x++) { uint32_t *d = dst + (SCR_W - 1 - x) * SCR_H; const uint32_t *s = back + x; for (int y = 0; y < SCR_H; y++) d[y] = s[y * SCR_W]; }
+        break;
+    case ROT_PORTRAIT_FLIP:  // px = 359 - x, py = 479 - y
+        for (int x = 0; x < SCR_W; x++) { uint32_t *d = dst + x * SCR_H + SCR_H - 1; const uint32_t *s = back + x; for (int y = 0; y < SCR_H; y++) d[-y] = s[y * SCR_W]; }
+        break;
+    case ROT_LANDSCAPE:      // 480x360 logical; px = 359 - y, py = x: a straight copy
+        memcpy(dst, back, frame * 4);
+        break;
+    case ROT_LANDSCAPE_FLIP: // px = y, py = 479 - x
+        for (int y = 0; y < SCR_W; y++) { uint32_t *d = dst + (SCR_W - 1 - y) * SCR_H + SCR_H - 1; const uint32_t *s = back + y * SCR_H; for (int x = 0; x < SCR_H; x++) d[-x] = s[x]; }
+        break;
     }
     ioctl(fbfd, JZFB_START_DMA, 0);
 }
 
+void gfx_set_rotation(int r) {
+    rot = r & 3;
+    int land = rot == ROT_LANDSCAPE || rot == ROT_LANDSCAPE_FLIP;
+    gfx_w = land ? SCR_H : SCR_W; gfx_h = land ? SCR_W : SCR_H;
+    gfx_clip(0, 0, gfx_w, gfx_h);
+}
+int gfx_rotation(void) { return rot; }
+
+// Touch reports portrait panel coordinates; convert to the current logical screen.
+void gfx_map_touch(int tx, int ty, int *x, int *y) {
+    switch (rot) {
+    default:                 *x = tx;              *y = ty; break;
+    case ROT_PORTRAIT_FLIP:  *x = SCR_W - 1 - tx;  *y = SCR_H - 1 - ty; break;
+    case ROT_LANDSCAPE:      *x = ty;              *y = SCR_W - 1 - tx; break;
+    case ROT_LANDSCAPE_FLIP: *x = SCR_H - 1 - ty;  *y = tx; break;
+    }
+}
+
 int gfx_screenshot(const char *path) {
     FILE *f = fopen(path, "wb"); if (!f) return -1;
-    fprintf(f, "P6\n%d %d\n255\n", SCR_W, SCR_H);
-    for (int i = 0; i < SCR_W * SCR_H; i++) { uint32_t p = back[i]; fputc(p >> 16 & 255, f); fputc(p >> 8 & 255, f); fputc(p & 255, f); }
+    fprintf(f, "P6\n%d %d\n255\n", gfx_w, gfx_h);
+    for (int i = 0; i < gfx_w * gfx_h; i++) { uint32_t p = back[i]; fputc(p >> 16 & 255, f); fputc(p >> 8 & 255, f); fputc(p & 255, f); }
     fclose(f); return 0;
 }
 
 // ---------- primitives ----------
 void gfx_clip(int x, int y, int w, int h) {
     clip_x0 = x < 0 ? 0 : x; clip_y0 = y < 0 ? 0 : y;
-    clip_x1 = x + w > SCR_W ? SCR_W : x + w; clip_y1 = y + h > SCR_H ? SCR_H : y + h;
+    clip_x1 = x + w > gfx_w ? gfx_w : x + w; clip_y1 = y + h > gfx_h ? gfx_h : y + h;
 }
 static inline void put(int x, int y, uint32_t c) {
-    if (x >= clip_x0 && x < clip_x1 && y >= clip_y0 && y < clip_y1) back[y * SCR_W + x] = c;
+    if (x >= clip_x0 && x < clip_x1 && y >= clip_y0 && y < clip_y1) back[y * gfx_w + x] = c;
 }
 static inline void blend(int x, int y, uint32_t c, int a) {
     if (x < clip_x0 || x >= clip_x1 || y < clip_y0 || y >= clip_y1 || a <= 0) return;
-    if (a >= 255) { back[y * SCR_W + x] = c; return; }
-    uint32_t d = back[y * SCR_W + x];
+    if (a >= 255) { back[y * gfx_w + x] = c; return; }
+    uint32_t d = back[y * gfx_w + x];
     uint32_t rb = ((c & 0xff00ff) * a + (d & 0xff00ff) * (255 - a)) >> 8 & 0xff00ff;
     uint32_t g = ((c & 0xff00) * a + (d & 0xff00) * (255 - a)) >> 8 & 0xff00;
-    back[y * SCR_W + x] = rb | g;
+    back[y * gfx_w + x] = rb | g;
 }
 void gfx_clear(uint32_t c) { for (int i = 0; i < SCR_W * SCR_H; i++) back[i] = c; }
 void gfx_rect(int x, int y, int w, int h, uint32_t c) {
     int x0 = x < clip_x0 ? clip_x0 : x, x1 = x + w > clip_x1 ? clip_x1 : x + w;
     int y0 = y < clip_y0 ? clip_y0 : y, y1 = y + h > clip_y1 ? clip_y1 : y + h;
-    for (int j = y0; j < y1; j++) for (int i = x0; i < x1; i++) back[j * SCR_W + i] = c;
+    for (int j = y0; j < y1; j++) for (int i = x0; i < x1; i++) back[j * gfx_w + i] = c;
 }
 void gfx_rrect(int x, int y, int w, int h, int r, uint32_t c) {
     if (r * 2 > h) r = h / 2; if (r * 2 > w) r = w / 2;

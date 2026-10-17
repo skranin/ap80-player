@@ -15,6 +15,7 @@ Verified on the device on 2026-10-16 with stock firmware 1.1 and the ap80dev hoo
 - The panel needs explicit refresh calls. Stock does this every frame:
   - once at start: `ioctl(fd, 0x80044620 /*SET_SLEEP*/, &0)` to wake the panel
   - each frame: `ioctl(fd, 0x80044660 /*GET_EMPTY_BUF*/, &idx)` → draw → `ioctl(fd, 0x80044661 /*START_DMA*/, 0)`
+  - two buffers in the mmap (`smem_len` 1384448), **page-aligned**: buffer `idx` starts at `idx * 0xA9000`, not at `idx * 360*480*4` (0xA8C00). Physical addresses are in jzfb's table at kernel `0x805E84B8` (0x2200000, 0x22A9000).
   - to sleep: SET_SLEEP with 1 — **don't use it**: suspending with a frame in flight leaves that buffer marked busy, and a later GET_EMPTY_BUF spins in the kernel forever while holding the fb mutex (unkillable, needs a reset). Use backlight 0 instead. Backlight: `/sys/class/backlight/pwm-backlight.0/brightness` (0–255).
 
 ## Input (evdev)

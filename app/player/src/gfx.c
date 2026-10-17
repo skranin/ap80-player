@@ -32,8 +32,10 @@ void gfx_present(void) {
     int idx = 0;
     ioctl(fbfd, JZFB_GET_EMPTY_BUF, &idx);
     size_t frame = (size_t)SCR_W * SCR_H;
-    if (idx < 0 || (idx + 1) * frame * 4 > fblen) idx = 0;
-    uint32_t *dst = fbmem + idx * frame;
+    // jzfb page-aligns each buffer: buffer 1 starts at 0xA9000, not at frame * 4 (0xA8C00).
+    size_t buf_bytes = (frame * 4 + 4095) & ~(size_t)4095;
+    if (idx < 0 || idx * buf_bytes + frame * 4 > fblen) idx = 0;
+    uint32_t *dst = (uint32_t *)((char *)fbmem + idx * buf_bytes);
     // The panel is landscape: 360 lines of 480 px. Portrait pixel (px, py) lives at fb[(359 - px) * 480 + py].
     switch (rot) {
     case ROT_PORTRAIT:       // px = x, py = y

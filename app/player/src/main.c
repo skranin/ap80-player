@@ -36,11 +36,11 @@
 
 // ---------- settings / state ----------
 static struct {
-    int volume, max_volume, brightness, timeout_idx, filter, resume_play, auto_rotate, orientation;
+    int volume, max_volume, brightness, timeout_idx, filter, resume_play, auto_rotate, orientation, text_size, vol_step;
     char browse[PATH_MAXLEN];
     char queue_root[PATH_MAXLEN]; int queue_recursive;
     char track[PATH_MAXLEN]; double pos;
-} cfg = { 25, 100, 120, 2, 0, 0, 0, ROT_PORTRAIT, MUSIC_ROOT, "", 0, "", 0 };
+} cfg = { 25, 100, 120, 2, 0, 0, 0, ROT_PORTRAIT, 0, 1, MUSIC_ROOT, "", 0, "", 0 };
 
 static const int timeouts[] = { 15, 30, 60, 120, 300, 0 };
 static const char *timeout_names[] = { "15 s", "30 s", "1 min", "2 min", "5 min", "Never" };
@@ -57,8 +57,8 @@ static void save_state(void) {
     if (st.has_queue) { snprintf(cfg.track, sizeof cfg.track, "%s", st.path); cfg.pos = st.pos; }
     char tmp[] = STATE_FILE ".tmp";
     FILE *f = fopen(tmp, "w"); if (!f) return;
-    fprintf(f, "volume=%d\nmax_volume=%d\nbrightness=%d\ntimeout=%d\nfilter=%d\nresume_play=%d\nauto_rotate=%d\norientation=%d\nbrowse=%s\nqueue_root=%s\nqueue_recursive=%d\ntrack=%s\npos=%.1f\n",
-            cfg.volume, cfg.max_volume, cfg.brightness, cfg.timeout_idx, cfg.filter, cfg.resume_play, cfg.auto_rotate, cfg.orientation, cfg.browse,
+    fprintf(f, "volume=%d\nmax_volume=%d\nbrightness=%d\ntimeout=%d\nfilter=%d\nresume_play=%d\nauto_rotate=%d\norientation=%d\ntext_size=%d\nvol_step=%d\nbrowse=%s\nqueue_root=%s\nqueue_recursive=%d\ntrack=%s\npos=%.1f\n",
+            cfg.volume, cfg.max_volume, cfg.brightness, cfg.timeout_idx, cfg.filter, cfg.resume_play, cfg.auto_rotate, cfg.orientation, cfg.text_size, cfg.vol_step, cfg.browse,
             cfg.queue_root, cfg.queue_recursive, cfg.track, cfg.pos);
     fclose(f); rename(tmp, STATE_FILE);
 }
@@ -77,6 +77,8 @@ static void load_state(void) {
         else if (!strcmp(line, "resume_play")) cfg.resume_play = atoi(v);
         else if (!strcmp(line, "auto_rotate")) cfg.auto_rotate = atoi(v);
         else if (!strcmp(line, "orientation")) cfg.orientation = atoi(v);
+        else if (!strcmp(line, "text_size")) cfg.text_size = atoi(v);
+        else if (!strcmp(line, "vol_step")) cfg.vol_step = atoi(v);
         else if (!strcmp(line, "browse")) snprintf(cfg.browse, sizeof cfg.browse, "%s", v);
         else if (!strcmp(line, "queue_root")) snprintf(cfg.queue_root, sizeof cfg.queue_root, "%s", v);
         else if (!strcmp(line, "queue_recursive")) cfg.queue_recursive = atoi(v);
@@ -88,12 +90,13 @@ static void load_state(void) {
     if (cfg.volume < 0) cfg.volume = 0; if (cfg.volume > cfg.max_volume) cfg.volume = cfg.max_volume;
     if (cfg.brightness < 5 || cfg.brightness > 255) cfg.brightness = 120;
     if (cfg.timeout_idx < 0 || cfg.timeout_idx > 5) cfg.timeout_idx = 2;
-    cfg.filter &= 7; cfg.orientation &= 3; cfg.auto_rotate = !!cfg.auto_rotate;
+    cfg.filter &= 7; cfg.orientation &= 3; cfg.auto_rotate = !!cfg.auto_rotate; cfg.text_size &= 3;
+    if (cfg.vol_step < 1 || cfg.vol_step > 3) cfg.vol_step = 1;
 }
 
 // ---------- library ----------
 typedef struct { char *name; int is_dir; } entry_t;
-static entry_t *ents; static int nents, has_audio_here;
+static entry_t *ents; static int nents, has_audio_here, lib_gen;
 
 static int hidden(const char *n) {
     return n[0] == '.' || !strcmp(n, "ap80dev") || !strcmp(n, "System Volume Information") || !strcmp(n, "$RECYCLE.BIN") || !strcmp(n, "LOST.DIR");
@@ -121,6 +124,7 @@ static void lib_load(const char *dir) {
     }
     closedir(d);
     qsort(ents, nents, sizeof *ents, ent_cmp);
+    lib_gen++;
 }
 
 typedef struct { char **v; int n, cap; } strvec_t;
@@ -172,7 +176,7 @@ typedef struct { int x, y, w, h, id, arg; } button_t;
 static button_t buttons[128]; static int nbuttons;
 enum { B_NONE, B_BACK_DIR, B_PLAY_ALL, B_ENTRY, B_TAB, B_PLAYPAUSE, B_NEXT, B_PREV,
        B_SEEK, B_SET_DEC, B_SET_INC, B_SET_CYCLE, B_STOCK, B_POWEROFF, B_USB_STORAGE, B_USB_CHARGE, B_USB_DONE };
-enum { S_BRIGHT, S_TIMEOUT, S_AUTOROT, S_ORIENT, S_MAXVOL, S_FILTER, S_RESUME };
+enum { S_TEXTSIZE, S_BRIGHT, S_TIMEOUT, S_AUTOROT, S_ORIENT, S_MAXVOL, S_VOLSTEP, S_FILTER, S_RESUME };
 
 static long now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000L + t.tv_nsec / 1000000; }
 static void add_button(int x, int y, int w, int h, int id, int arg) { if (nbuttons < 128) buttons[nbuttons++] = (button_t){ x, y, w, h, id, arg }; }
@@ -186,10 +190,18 @@ static void strip_ext(char *s) { char *e = strrchr(s, '.'); if (e && e != s) *e 
 static void fmt_time(char *o, int n, double t) { int s = t < 0 ? 0 : (int)t; snprintf(o, n, "%d:%02d", s / 60, s % 60); }
 
 // ---------- layout ----------
-#define STATUS_H 34
+// All sizes follow the "Text size" setting (gfx text scale). T(px) is a font size after scaling.
+#define T(px) gfx_text_px(px)
+#define LH(font, px) gfx_line_h(font, px)
 static int landscape(void) { return gfx_w > gfx_h; }
-static int tray_h(void) { return landscape() ? 72 : 92; }
-static int content_y(void) { return STATUS_H; }
+// Status line and tray labels grow less, so three tray buttons still fit side by side.
+static int cap_scale(int cap) { int old = gfx_text_scale(); if (old > cap) gfx_set_text_scale(cap); return old; }
+static int status_h(void) { int o = cap_scale(125); int h = LH(FONT_BOLD, 19) + 11; gfx_set_text_scale(o); return h; }
+static int tray_h(void) {
+    int o = cap_scale(125), lh = LH(FONT_BOLD, 19); gfx_set_text_scale(o);
+    return landscape() ? (lh + 46 > 72 ? lh + 46 : 72) : 58 + lh + 10;
+}
+static int content_y(void) { return status_h(); }
 static int content_bottom(void) { return usb_mode ? gfx_h : gfx_h - tray_h(); }
 
 // ---------- drawing helpers ----------
@@ -205,29 +217,51 @@ static void draw_skip_icon(int cx, int cy, int s, int dir, uint32_t c) {
 }
 // Folder icon, s = width.
 static void draw_folder_icon(int x, int y, int s, uint32_t c) { gfx_rrect(x, y, s * 2 / 5, s / 4, 3, c); gfx_rrect(x, y + s / 8, s, s * 5 / 8, 4, c); }
-static void text_center(int font, int px, int cx, int y, uint32_t c, const char *s) { gfx_text(font, px, cx - gfx_text_w(font, px, s) / 2, y, 0, c, s); }
+// Top y that vertically centers a line of text of this size on cy.
+static int vc(int px, int cy) { return cy - T(px) * 29 / 50; }
+static void text_vc(int font, int px, int x, int cy, int maxw, uint32_t c, const char *s) { gfx_text(font, px, x, vc(px, cy), maxw, c, s); }
+static void text_center(int font, int px, int cx, int cy, int maxw, uint32_t c, const char *s) {
+    int w = gfx_text_w(font, px, s); if (maxw && w > maxw) w = maxw;
+    gfx_text(font, px, cx - w / 2, vc(px, cy), maxw, c, s);
+}
+// A full-width rounded button whose label wraps to fit. Returns its height.
+static int big_button(int x, int y, int w, uint32_t bg, int font, uint32_t fg, const char *label, int id, int draw) {
+    int px = 22, n = gfx_text_lines(font, px, w - 36, 2, label), lh = LH(font, px);
+    int h = n * lh + 22; if (h < 56) h = 56;
+    if (draw) {
+        gfx_rrect(x, y, w, h, 12, bg);
+        gfx_text_wrap(font, px, x + 18, y + (h - n * lh) / 2 + (lh - T(px)) / 4, w - 36, 2, fg, label);
+        add_button(x, y, w, h, id, 0);
+    }
+    return h;
+}
 
 static void draw_status_bar(void) {
-    gfx_rect(0, 0, gfx_w, STATUS_H, C_PANEL);
+    int o = cap_scale(125), h = status_h(), cy = h / 2;
+    gfx_rect(0, 0, gfx_w, h, C_PANEL);
     char s[64];
     audio_status_t st; audio_status(&st);
     int x = 12;
-    if (st.has_queue) { if (st.playing) draw_play_icon(x + 8, 17, 16, C_ACCENT); else draw_pause_icon(x + 8, 17, 14, C_DIM); x += 26; }
+    if (st.has_queue) { if (st.playing) draw_play_icon(x + 8, cy, 16, C_ACCENT); else draw_pause_icon(x + 8, cy, 14, C_DIM); x += 26; }
     snprintf(s, sizeof s, "Vol %d", cfg.volume);
-    x += gfx_text(FONT_BOLD, 19, x, 6, 0, C_TEXT, s) + 12;
-    if (!headset) gfx_text(FONT_REG, 17, x, 7, gfx_w / 2, C_ACCENT, "no headphones");
+    x += gfx_text(FONT_BOLD, 19, x, vc(19, cy), 0, C_TEXT, s) + 12;
+    int right = gfx_w - 12;
     if (battery >= 0) {
         snprintf(s, sizeof s, "%s%d%%", charging ? "+" : "", battery);
         int w = gfx_text_w(FONT_BOLD, 19, s), bx = gfx_w - 40;
-        gfx_text(FONT_BOLD, 19, bx - w - 8, 6, 0, C_TEXT, s);
-        gfx_rect(bx, 9, 28, 16, C_DIM); gfx_rect(bx + 2, 11, 24, 12, C_PANEL); gfx_rect(bx + 28, 13, 3, 8, C_DIM);
-        gfx_rect(bx + 3, 12, 22 * battery / 100, 10, battery <= 15 ? 0xe04848 : C_TEXT);
+        gfx_text(FONT_BOLD, 19, bx - w - 8, vc(19, cy), 0, C_TEXT, s);
+        gfx_rect(bx, cy - 8, 28, 16, C_DIM); gfx_rect(bx + 2, cy - 6, 24, 12, C_PANEL); gfx_rect(bx + 28, cy - 4, 3, 8, C_DIM);
+        gfx_rect(bx + 3, cy - 5, 22 * battery / 100, 10, battery <= 15 ? 0xe04848 : C_TEXT);
+        right = bx - w - 16;
     }
+    if (!headset && right - x > 30) gfx_text(FONT_REG, 17, x, vc(17, cy), right - x, C_ACCENT, "no headphones");
+    gfx_set_text_scale(o);
 }
 
 // Bottom tray: Player / Library / Settings.
 static void draw_tray(void) {
-    int th = tray_h(), y = gfx_h - th, w = gfx_w / 3;
+    int o = cap_scale(125);
+    int th = tray_h(), y = gfx_h - th, w = gfx_w / 3, lh = LH(FONT_BOLD, 19);
     gfx_rect(0, y, gfx_w, th, C_PANEL);
     gfx_rect(0, y, gfx_w, 1, C_LINE);
     static const char *labels[] = { "Player", "Library", "Settings" };
@@ -235,16 +269,23 @@ static void draw_tray(void) {
         int x = i * w, active = screen == i, cx = x + w / 2;
         uint32_t c = active ? C_ACCENT : C_DIM;
         if (active) { gfx_rect(x + 12, y, w - 24, 4, C_ACCENT); }
-        int lw = gfx_text_w(FONT_BOLD, 19, labels[i]), isz = 30;
-        int icx, icy, lx, ly;
-        if (landscape()) { int tot = isz + 10 + lw; icx = cx - tot / 2 + isz / 2; icy = y + th / 2; lx = icx + isz / 2 + 10; ly = y + th / 2 - 12; }
-        else { icx = cx; icy = y + 32; lx = cx - lw / 2; ly = y + 56; }
+        int isz = 30, lw = gfx_text_w(FONT_BOLD, 19, labels[i]);
+        int icx, icy, lx, ly, lmax;
+        if (landscape()) {
+            lmax = w - isz - 22; if (lw > lmax) lw = lmax;
+            int tot = isz + 10 + lw; icx = cx - tot / 2 + isz / 2; icy = y + th / 2; lx = icx + isz / 2 + 10; ly = vc(19, y + th / 2);
+        } else { lmax = w - 8; if (lw > lmax) lw = lmax; icx = cx; icy = y + 32; lx = cx - lw / 2; ly = y + 56 + (lh - T(19)) / 4; }
         if (i == SCR_PLAYER) { gfx_circle(icx, icy, isz / 2, c); draw_play_icon(icx + 2, icy, isz / 2, C_PANEL); }
         else if (i == SCR_LIBRARY) draw_folder_icon(icx - isz / 2, icy - isz * 3 / 8, isz, c);
-        else gfx_text(FONT_REG, 36, icx - gfx_text_w(FONT_REG, 36, "\xe2\x9a\x99") / 2, icy - 23, 0, c, "\xe2\x9a\x99");  // U+2699 gear
-        gfx_text(FONT_BOLD, 19, lx, ly, 0, active ? C_ACCENT : C_TEXT, labels[i]);
+        else {  // U+2699 gear, icon-sized regardless of text size
+            gfx_set_text_scale(100);
+            gfx_text(FONT_REG, 36, icx - gfx_text_w(FONT_REG, 36, "\xe2\x9a\x99") / 2, icy - 23, 0, c, "\xe2\x9a\x99");
+            gfx_set_text_scale(o > 125 ? 125 : o);
+        }
+        gfx_text(FONT_BOLD, 19, lx, ly, lmax, active ? C_ACCENT : C_TEXT, labels[i]);
         add_button(x, y, w, th, B_TAB, i);
     }
+    gfx_set_text_scale(o);
 }
 
 // Clamps a page's scroll and draws its scrollbar. view = visible height.
@@ -258,30 +299,60 @@ static void finish_scroll(int page, int top, int view) {
 }
 
 // ---------- pages ----------
-#define HEADER_H 60
-#define ROW_H 70
+#define LIST_X 70         // text column in lists
+#define NAME_PX 22
+
+// Library rows can wrap a long name onto two lines, so heights vary. They are cached and
+// recomputed when the folder, text size or orientation changes.
+static int *row_top, row_cache_n = -1, row_cache_w, row_cache_scale, row_cache_gen;
+static int lib_row_h(int lines) { int h = lines * LH(FONT_REG, NAME_PX) + 26; return h < 70 ? 70 : h; }
+static void lib_layout(int at_root) {
+    int rows = nents + (nents ? 1 : 0);
+    if (row_cache_n == rows && row_cache_w == gfx_w && row_cache_scale == gfx_text_scale() && row_cache_gen == lib_gen) return;
+    free(row_top); row_top = malloc((rows + 1) * sizeof(int));
+    int y = 0;
+    for (int r = 0; r < rows; r++) {
+        row_top[r] = y;
+        int lines = 1;
+        if (r == 0) lines = gfx_text_lines(FONT_BOLD, NAME_PX, gfx_w - LIST_X - 20, 2, has_audio_here || at_root ? "Play all" : "Play all (with subfolders)");
+        else {
+            entry_t *e = &ents[r - 1]; char name[512]; snprintf(name, sizeof name, "%s", e->name);
+            if (!e->is_dir) strip_ext(name);
+            lines = gfx_text_lines(FONT_REG, NAME_PX, gfx_w - LIST_X - (e->is_dir ? 40 : 16), 2, name);
+        }
+        y += lib_row_h(lines);
+    }
+    row_top[rows] = y;
+    row_cache_n = rows; row_cache_w = gfx_w; row_cache_scale = gfx_text_scale(); row_cache_gen = lib_gen;
+}
 
 static void draw_library(void) {
     audio_status_t st; audio_status(&st);
     int at_root = !strcmp(cfg.browse, MUSIC_ROOT), top = content_y(), bot = content_bottom();
     // header: back + folder name
+    int hh = LH(FONT_BOLD, 24) + 26; if (hh < 60) hh = 60;
     int tx = 18;
-    if (!at_root) { draw_chevron_left(14, top + HEADER_H / 2, 26, C_ACCENT, C_BG); add_button(0, top, 80, HEADER_H, B_BACK_DIR, 0); tx = 52; }
-    gfx_text(FONT_BOLD, 24, tx, top + 15, gfx_w - tx - 14, C_TEXT, at_root ? "Library" : base_name(cfg.browse));
-    gfx_rect(0, top + HEADER_H - 1, gfx_w, 1, C_LINE);
-    int ly = top + HEADER_H, view = bot - ly;
+    if (!at_root) { draw_chevron_left(14, top + hh / 2, 26, C_ACCENT, C_BG); add_button(0, top, 80, hh, B_BACK_DIR, 0); tx = 52; }
+    text_vc(FONT_BOLD, 24, tx, top + hh / 2, gfx_w - tx - 14, C_TEXT, at_root ? "Library" : base_name(cfg.browse));
+    gfx_rect(0, top + hh - 1, gfx_w, 1, C_LINE);
+    int ly = top + hh, view = bot - ly;
     int rows = nents + (nents ? 1 : 0);
-    content_h[SCR_LIBRARY] = rows * ROW_H;
+    lib_layout(at_root);
+    content_h[SCR_LIBRARY] = row_top[rows];
     finish_scroll(SCR_LIBRARY, ly, view);
     gfx_clip(0, ly, gfx_w - 8, view);
-    if (!nents) gfx_text(FONT_REG, 21, 20, ly + 30, gfx_w - 40, C_DIM, "No music in this folder");
+    if (!nents) gfx_text_wrap(FONT_REG, 21, 20, ly + 30, gfx_w - 40, 3, C_DIM, "No music in this folder");
+    int nlh = LH(FONT_REG, NAME_PX);
     for (int r = 0; r < rows; r++) {
-        int y = ly + r * ROW_H - scroll[SCR_LIBRARY];
-        if (y + ROW_H < ly || y > bot) continue;
-        int id = r == 0 ? B_PLAY_ALL : B_ENTRY, arg = r - 1, mid = y + ROW_H / 2;
+        int y = ly + row_top[r] - scroll[SCR_LIBRARY], rh = row_top[r + 1] - row_top[r];
+        if (y + rh < ly) continue;
+        if (y > bot) break;
+        int id = r == 0 ? B_PLAY_ALL : B_ENTRY, arg = r - 1, mid = y + rh / 2;
         if (r == 0) {
+            const char *label = has_audio_here || at_root ? "Play all" : "Play all (with subfolders)";
+            int n = gfx_text_lines(FONT_BOLD, NAME_PX, gfx_w - LIST_X - 20, 2, label);
             gfx_circle(36, mid, 20, C_ACCENT); draw_play_icon(38, mid, 16, C_BG);
-            gfx_text(FONT_BOLD, 22, 70, mid - 14, gfx_w - 90, C_ACCENT, has_audio_here || at_root ? "Play all" : "Play all (with subfolders)");
+            gfx_text_wrap(FONT_BOLD, NAME_PX, LIST_X, vc(NAME_PX, mid) - (n - 1) * nlh / 2, gfx_w - LIST_X - 20, 2, C_ACCENT, label);
         } else {
             entry_t *e = &ents[arg];
             char name[512]; snprintf(name, sizeof name, "%s", e->name);
@@ -291,13 +362,17 @@ static void draw_library(void) {
                 char full[PATH_MAXLEN]; snprintf(full, sizeof full, "%s/%s", cfg.browse, e->name);
                 playing_this = st.has_queue && !strcmp(full, st.path);
                 strip_ext(name);
+                int o = gfx_text_scale(); gfx_set_text_scale(100);
                 gfx_text(FONT_REG, 28, 24, mid - 18, 0, playing_this ? C_ACCENT : C_DIM, "\xe2\x99\xaa");  // U+266A note
+                gfx_set_text_scale(o);
             }
-            gfx_text(FONT_REG, 22, 70, mid - 14, gfx_w - 70 - (e->is_dir ? 40 : 16), playing_this ? C_ACCENT : C_TEXT, name);
-            if (e->is_dir) gfx_text(FONT_BOLD, 28, gfx_w - 32, mid - 18, 0, C_DIM, "\xe2\x80\xba");  // U+203A ›
+            int maxw = gfx_w - LIST_X - (e->is_dir ? 40 : 16);
+            int n = gfx_text_lines(FONT_REG, NAME_PX, maxw, 2, name);
+            gfx_text_wrap(FONT_REG, NAME_PX, LIST_X, vc(NAME_PX, mid) - (n - 1) * nlh / 2, maxw, 2, playing_this ? C_ACCENT : C_TEXT, name);
+            if (e->is_dir) { int o = gfx_text_scale(); gfx_set_text_scale(100); gfx_text(FONT_BOLD, 28, gfx_w - 32, mid - 18, 0, C_DIM, "\xe2\x80\xba"); gfx_set_text_scale(o); }  // U+203A ›
         }
-        gfx_rect(70, y + ROW_H - 1, gfx_w - 70, 1, C_LINE);
-        add_button(0, y < ly ? ly : y, gfx_w, ROW_H - (y < ly ? ly - y : 0), id, arg);
+        gfx_rect(LIST_X, y + rh - 1, gfx_w - LIST_X, 1, C_LINE);
+        add_button(0, y < ly ? ly : y, gfx_w, rh - (y < ly ? ly - y : 0), id, arg);
     }
     gfx_clip(0, 0, gfx_w, gfx_h);
 }
@@ -306,8 +381,9 @@ static void draw_player(void) {
     audio_status_t st; audio_status(&st);
     int top = content_y(), bot = content_bottom(), land = landscape(), m = 20, w = gfx_w - 2 * m;
     if (!st.has_queue) {
-        gfx_text_wrap(FONT_BOLD, 26, m, top + 40, w, 2, C_TEXT, "Nothing is playing");
-        gfx_text_wrap(FONT_REG, 21, m, top + 84, w, 3, C_DIM, "Pick a song or a folder in the Library.");
+        int y = top + 30;
+        y += gfx_text_wrap(FONT_BOLD, 26, m, y, w, 2, C_TEXT, "Nothing is playing") * LH(FONT_BOLD, 26) + 12;
+        gfx_text_wrap(FONT_REG, 21, m, y, w, 4, C_DIM, "Pick a song or a folder in the Library.");
         return;
     }
     // bottom-up: controls, seek bar, format line
@@ -320,7 +396,8 @@ static void draw_player(void) {
     add_button(cx - r - 14, cy - r - 10, 2 * r + 28, 2 * r + 20, B_PLAYPAUSE, 0);
     draw_skip_icon(cx + gap, cy, 30, 1, C_TEXT); add_button(cx + gap - 56, cy - 44, 112, 88, B_NEXT, 0);
 
-    int py = cy - r - (land ? 44 : 56);   // seek bar
+    int tlh19 = LH(FONT_BOLD, 19);
+    int py = cy - r - 18 - tlh19 - (land ? 4 : 14);   // seek bar, with the times under it
     double frac = st.dur > 0 ? st.pos / st.dur : 0;
     if (scrub_active) frac = (double)(scrub_x - m) / w;   // follow the finger until release
     if (frac > 1) frac = 1; if (frac < 0) frac = 0;
@@ -334,9 +411,12 @@ static void draw_player(void) {
     char info[96];
     if (st.rate) snprintf(info, sizeof info, "%d / %d   \xc2\xb7   %s %.1f kHz %d bit", st.index + 1, st.count, st.format, st.rate / 1000.0, st.bits);
     else snprintf(info, sizeof info, "%d / %d", st.index + 1, st.count);
-    int iy = py - (land ? 30 : 38);
-    gfx_text(FONT_REG, 18, m, iy, w, C_DIM, info);
-    if (st.error[0]) { gfx_text(FONT_REG, 18, m, iy - 26, w, 0xe04848, st.error); iy -= 26; }
+    int tpx = land ? 26 : 30, spx = land ? 20 : 22, y = top + (land ? 10 : 18);
+    // The format line (and an error) go above the seek bar if the title still fits above them.
+    int ilh = LH(FONT_REG, 18), iy = py - 16 - ilh;
+    if (iy - 6 - y >= LH(FONT_BOLD, tpx)) gfx_text(FONT_REG, 18, m, iy, w, C_DIM, info);
+    else iy = py - 12;
+    if (st.error[0] && iy - ilh - 10 - y >= LH(FONT_BOLD, tpx)) { iy -= ilh + 4; gfx_text(FONT_REG, 18, m, iy, w, 0xe04848, st.error); }
 
     // top: title, artist - album, folder (as much as fits)
     char title[300], line2[600], line3[600];
@@ -346,107 +426,125 @@ static void draw_player(void) {
     else snprintf(line2, sizeof line2, "%s", st.artist[0] ? st.artist : st.album);
     char dir[PATH_MAXLEN]; snprintf(dir, sizeof dir, "%s", st.path); char *sl = strrchr(dir, '/'); if (sl) *sl = 0;
     snprintf(line3, sizeof line3, "%s", base_name(dir));
-    int tpx = land ? 26 : 30, spx = land ? 20 : 22, y = top + (land ? 12 : 22), lim = iy - 8;
-    int tlh = gfx_line_h(FONT_BOLD, tpx), slh = gfx_line_h(FONT_REG, spx);
-    int extra = (line2[0] ? slh : 0) + slh;                // keep room for at least line2 + folder
+    int lim = iy - 6;
+    while (tpx > 16 && LH(FONT_BOLD, tpx) > lim - y) tpx -= 2;   // a big text size in landscape: shrink the title to fit
+    int tlh = LH(FONT_BOLD, tpx), slh = LH(FONT_REG, spx);
+    int extra = line2[0] ? slh : 0;                       // keep room for at least the artist line
     int tl = (lim - y - extra) / tlh; if (tl > 3) tl = 3; if (tl < 1) tl = 1;
     y += gfx_text_wrap(FONT_BOLD, tpx, m, y, w, tl, C_TEXT, title) * tlh + 6;
     if (line2[0] && y + slh <= lim) {
-        int l2 = (lim - y - slh) / slh; if (l2 > 2) l2 = 2; if (l2 < 1) l2 = 1;
+        int l2 = (lim - y) / slh; if (l2 > 2) l2 = 2; if (l2 < 1) l2 = 1;
         y += gfx_text_wrap(FONT_REG, spx, m, y, w, l2, C_DIM, line2) * slh + 2;
     }
-    if ((!line2[0] || strcmp(line3, st.album)) && y + slh <= lim) gfx_text(FONT_REG, spx - 2, m, y, w, C_DIM, line3);
+    if ((!line2[0] || strcmp(line3, st.album)) && y + LH(FONT_REG, spx - 2) <= lim) gfx_text(FONT_REG, spx - 2, m, y, w, C_DIM, line3);
 }
 
-#define SET_ROW_H 68
+static const int text_sizes[] = { 100, 125, 150, 175 };
+static const char *text_size_names[] = { "Normal", "Large", "Larger", "Largest" };
+
+#define LABEL_PX 22
+#define VALUE_PX 20
 static void draw_settings(void) {
     int top = content_y(), bot = content_bottom(), view = bot - top;
     char v[64];
     struct { const char *label; int kind, id; } rows[] = {   // kind 1 = -/+, 0 = tap to change
-        { "Brightness", 1, S_BRIGHT }, { "Screen off after", 0, S_TIMEOUT }, { "Auto-rotate", 0, S_AUTOROT },
-        { "Orientation", 0, S_ORIENT }, { "Max volume", 1, S_MAXVOL }, { "DAC filter", 0, S_FILTER }, { "On start", 0, S_RESUME },
+        { "Text size", 0, S_TEXTSIZE }, { "Brightness", 1, S_BRIGHT }, { "Screen off after", 0, S_TIMEOUT },
+        { "Auto-rotate", 0, S_AUTOROT }, { "Orientation", 0, S_ORIENT }, { "Max volume", 1, S_MAXVOL }, { "Volume step", 0, S_VOLSTEP },
+        { "DAC filter", 0, S_FILTER }, { "On start", 0, S_RESUME },
     };
-    int nrows = sizeof rows / sizeof rows[0];
-    content_h[SCR_SETTINGS] = nrows * SET_ROW_H + 2 * 70 + 60;
-    finish_scroll(SCR_SETTINGS, top, view);
-    gfx_clip(0, top, gfx_w - 8, view);
-    int y = top - scroll[SCR_SETTINGS], m = 18, vw = gfx_w * 11 / 20;  // value column width
-    for (int i = 0; i < nrows; i++, y += SET_ROW_H) {
-        int dim = 0;
-        switch (rows[i].id) {
-        case S_BRIGHT: snprintf(v, sizeof v, "%d%%", cfg.brightness * 100 / 255); break;
-        case S_TIMEOUT: snprintf(v, sizeof v, "%s", timeout_names[cfg.timeout_idx]); break;
-        case S_AUTOROT: snprintf(v, sizeof v, "%s", cfg.auto_rotate ? "On" : "Off"); break;
-        case S_ORIENT: snprintf(v, sizeof v, "%s", orient_names[cfg.auto_rotate ? gfx_rotation() : cfg.orientation]); dim = cfg.auto_rotate; break;
-        case S_FILTER: snprintf(v, sizeof v, "%s", filter_names[cfg.filter]); break;
-        case S_MAXVOL: snprintf(v, sizeof v, "%d", cfg.max_volume); break;
-        case S_RESUME: snprintf(v, sizeof v, "%s", cfg.resume_play ? "Resume playing" : "Paused"); break;
+    int nrows = sizeof rows / sizeof rows[0], m = 18, bw = gfx_w - 2 * m;
+    int llh = LH(FONT_REG, LABEL_PX), vlh = LH(FONT_BOLD, VALUE_PX);
+    int bs = T(30) + 18; if (bs < 48) bs = 48;             // -/+ button size
+    int ctl_w = 2 * bs + T(22) * 3 + 20;                   // "-  100%  +"
+    // pass 0 measures, pass 1 draws
+    int y0 = top - scroll[SCR_SETTINGS], y = y0;
+    for (int pass = 0; pass < 2; pass++) {
+        y = y0;
+        if (pass) { finish_scroll(SCR_SETTINGS, top, view); gfx_clip(0, top, gfx_w - 8, view); y = y0 = top - scroll[SCR_SETTINGS]; }
+        for (int i = 0; i < nrows; i++) {
+            int dim = 0;
+            switch (rows[i].id) {
+            case S_TEXTSIZE: snprintf(v, sizeof v, "%s", text_size_names[cfg.text_size]); break;
+            case S_BRIGHT: snprintf(v, sizeof v, "%d%%", cfg.brightness * 100 / 255); break;
+            case S_TIMEOUT: snprintf(v, sizeof v, "%s", timeout_names[cfg.timeout_idx]); break;
+            case S_AUTOROT: snprintf(v, sizeof v, "%s", cfg.auto_rotate ? "On" : "Off"); break;
+            case S_ORIENT: snprintf(v, sizeof v, "%s", orient_names[cfg.auto_rotate ? gfx_rotation() : cfg.orientation]); dim = cfg.auto_rotate; break;
+            case S_FILTER: snprintf(v, sizeof v, "%s", filter_names[cfg.filter]); break;
+            case S_MAXVOL: snprintf(v, sizeof v, "%d", cfg.max_volume); break;
+            case S_VOLSTEP: snprintf(v, sizeof v, "%d per click", cfg.vol_step); break;
+            case S_RESUME: snprintf(v, sizeof v, "%s", cfg.resume_play ? "Resume playing" : "Paused"); break;
+            }
+            int kind = rows[i].kind;
+            int lw = gfx_text_w(FONT_REG, LABEL_PX, rows[i].label), vw = gfx_text_w(FONT_BOLD, VALUE_PX, v);
+            int right_w = kind == 1 ? ctl_w : vw;
+            int stacked = m + lw + 16 + right_w + m > gfx_w;    // label above, control below
+            int rh = stacked ? llh + (kind == 1 ? bs : vlh) + 30 : (kind == 1 ? bs : llh) + 24;
+            if (rh < 68) rh = 68;
+            if (pass) {
+                int lcy = stacked ? y + 12 + llh / 2 : y + rh / 2;                 // label line center
+                int ccy = stacked ? y + 12 + llh + 6 + (kind == 1 ? bs : vlh) / 2 : y + rh / 2;  // control center
+                text_vc(FONT_REG, LABEL_PX, m, lcy, stacked ? bw : gfx_w - 2 * m - right_w - 16, dim ? C_DIM : C_TEXT, rows[i].label);
+                if (kind == 1) {
+                    int xp = gfx_w - m - bs, xm = gfx_w - m - ctl_w;
+                    gfx_rrect(xm, ccy - bs / 2, bs, bs, 10, C_PANEL); text_center(FONT_BOLD, 30, xm + bs / 2, ccy, 0, C_ACCENT, "\xe2\x88\x92");
+                    gfx_rrect(xp, ccy - bs / 2, bs, bs, 10, C_PANEL); text_center(FONT_BOLD, 30, xp + bs / 2, ccy, 0, C_ACCENT, "+");
+                    text_center(FONT_BOLD, 22, (xm + bs + xp) / 2, ccy, 0, C_TEXT, v);
+                    add_button(xm - 12, y, bs + 24, rh, B_SET_DEC, rows[i].id);
+                    add_button(xp - 12, y, bs + 24 + m, rh, B_SET_INC, rows[i].id);
+                } else {
+                    int maxw = stacked ? bw : right_w; if (vw > maxw) vw = maxw;
+                    text_vc(FONT_BOLD, VALUE_PX, gfx_w - m - vw, ccy, maxw, dim ? C_DIM : C_ACCENT, v);
+                    if (!dim) add_button(0, y, gfx_w, rh, B_SET_CYCLE, rows[i].id);
+                }
+                gfx_rect(m, y + rh - 1, gfx_w - m, 1, C_LINE);
+            }
+            y += rh;
         }
-        int mid = y + SET_ROW_H / 2;
-        int lw = rows[i].kind == 1 ? gfx_w - 2 * 48 - 100 - m : gfx_w - 2 * m - 16 - (gfx_text_w(FONT_BOLD, 20, v) < vw ? gfx_text_w(FONT_BOLD, 20, v) : vw);
-        gfx_text(FONT_REG, 22, m, mid - 14, lw, dim ? C_DIM : C_TEXT, rows[i].label);
-        if (rows[i].kind == 1) {
-            int bs = 48;
-            gfx_rrect(gfx_w - 2 * bs - 70, mid - bs / 2, bs, bs, 10, C_PANEL); text_center(FONT_BOLD, 30, gfx_w - 2 * bs - 70 + bs / 2, mid - 19, C_ACCENT, "\xe2\x88\x92");
-            gfx_rrect(gfx_w - bs - 14, mid - bs / 2, bs, bs, 10, C_PANEL); text_center(FONT_BOLD, 30, gfx_w - bs / 2 - 14, mid - 19, C_ACCENT, "+");
-            text_center(FONT_BOLD, 22, gfx_w - bs - 42, mid - 14, C_TEXT, v);
-            add_button(gfx_w - 2 * bs - 82, y, bs + 24, SET_ROW_H, B_SET_DEC, rows[i].id);
-            add_button(gfx_w - bs - 26, y, bs + 26, SET_ROW_H, B_SET_INC, rows[i].id);
-        } else {
-            int w = gfx_text_w(FONT_BOLD, 20, v); if (w > vw) w = vw;
-            gfx_text(FONT_BOLD, 20, gfx_w - m - w, mid - 13, vw, dim ? C_DIM : C_ACCENT, v);
-            if (!dim) add_button(0, y, gfx_w, SET_ROW_H, B_SET_CYCLE, rows[i].id);
-        }
-        gfx_rect(m, y + SET_ROW_H - 1, gfx_w - m, 1, C_LINE);
+        y += 14;
+        int usb = usb_host_connected();
+        y += big_button(m, y, bw, usb ? C_ACCENT : C_PANEL, usb ? FONT_BOLD : FONT_REG, usb ? C_BG : C_TEXT,
+                        usb ? "USB storage (copy music)" : "Switch to stock player", usb ? B_USB_STORAGE : B_STOCK, pass) + 14;
+        y += big_button(m, y, bw, C_PANEL, FONT_REG, 0xff6a6a, "Power off  (or hold power)", B_POWEROFF, pass) + 14;
+        if (pass) gfx_text(FONT_REG, 16, m, y + 6, 0, C_DIM, "ap80player " VERSION);
+        y += LH(FONT_REG, 16) + 20;
+        if (!pass) content_h[SCR_SETTINGS] = y - y0;
     }
-    y += 14;
-    int bw = gfx_w - 2 * m;
-    if (usb_host_connected()) {  // replaces the stock-player button while a computer is connected
-        gfx_rrect(m, y, bw, 56, 12, C_ACCENT); gfx_text(FONT_BOLD, 22, m + 18, y + 14, bw - 36, C_BG, "USB storage (copy music)");
-        add_button(m, y, bw, 56, B_USB_STORAGE, 0);
-    } else {
-        gfx_rrect(m, y, bw, 56, 12, C_PANEL); gfx_text(FONT_REG, 22, m + 18, y + 14, bw - 36, C_TEXT, "Switch to stock player");
-        add_button(m, y, bw, 56, B_STOCK, 0);
-    }
-    y += 70;
-    gfx_rrect(m, y, bw, 56, 12, C_PANEL); gfx_text(FONT_REG, 22, m + 18, y + 14, bw - 36, 0xff6a6a, "Power off  (or hold power)");
-    add_button(m, y, bw, 56, B_POWEROFF, 0);
-    y += 70;
-    gfx_text(FONT_REG, 16, m, y + 6, 0, C_DIM, "ap80player " VERSION);
     gfx_clip(0, 0, gfx_w, gfx_h);
 }
 
 static void draw_usb_prompt(void) {
     int top = content_y(), m = 20, w = gfx_w - 2 * m, land = landscape();
-    int y = top + (land ? 16 : 40);
-    gfx_text(FONT_BOLD, 26, m, y, w, C_TEXT, "Connected to computer");
-    y += 44;
-    y += gfx_text_wrap(FONT_REG, 20, m, y, w, 3, C_DIM, "Use USB storage to copy music to the SD card. Playback stops while the card is connected.") * 25 + 16;
-    int bh = land ? 60 : 72;
+    int y = top + (land ? 14 : 34);
+    y += gfx_text_wrap(FONT_BOLD, 26, m, y, w, 2, C_TEXT, "Connected to computer") * LH(FONT_BOLD, 26) + 10;
+    y += gfx_text_wrap(FONT_REG, 20, m, y, w, 5, C_DIM, "Use USB storage to copy music to the SD card. Playback stops while the card is connected.") * LH(FONT_REG, 20) + 16;
+    int bh = LH(FONT_BOLD, 24) + 34; if (bh < (land ? 60 : 72)) bh = land ? 60 : 72;
     if (land) {
         int bw = (w - 16) / 2;
-        gfx_rrect(m, y, bw, bh, 14, C_ACCENT); text_center(FONT_BOLD, 23, m + bw / 2, y + bh / 2 - 15, C_BG, "USB storage");
+        if (y + bh > gfx_h - 8) y = gfx_h - 8 - bh;
+        gfx_rrect(m, y, bw, bh, 14, C_ACCENT); text_center(FONT_BOLD, 23, m + bw / 2, y + bh / 2, bw - 16, C_BG, "USB storage");
         add_button(m, y, bw, bh, B_USB_STORAGE, 0);
-        gfx_rrect(m + bw + 16, y, bw, bh, 14, C_PANEL); text_center(FONT_BOLD, 23, m + bw + 16 + bw / 2, y + bh / 2 - 15, C_TEXT, "Just charge");
+        gfx_rrect(m + bw + 16, y, bw, bh, 14, C_PANEL); text_center(FONT_BOLD, 23, m + bw + 16 + bw / 2, y + bh / 2, bw - 16, C_TEXT, "Just charge");
         add_button(m + bw + 16, y, bw, bh, B_USB_CHARGE, 0);
     } else {
-        gfx_rrect(m, y, w, bh, 14, C_ACCENT); text_center(FONT_BOLD, 24, gfx_w / 2, y + bh / 2 - 15, C_BG, "USB storage");
+        if (y + 2 * bh + 16 > gfx_h - 12) y = gfx_h - 12 - 2 * bh - 16;
+        gfx_rrect(m, y, w, bh, 14, C_ACCENT); text_center(FONT_BOLD, 24, gfx_w / 2, y + bh / 2, w - 16, C_BG, "USB storage");
         add_button(m, y, w, bh, B_USB_STORAGE, 0);
         y += bh + 16;
-        gfx_rrect(m, y, w, bh, 14, C_PANEL); text_center(FONT_BOLD, 24, gfx_w / 2, y + bh / 2 - 15, C_TEXT, "Just charge");
+        gfx_rrect(m, y, w, bh, 14, C_PANEL); text_center(FONT_BOLD, 24, gfx_w / 2, y + bh / 2, w - 16, C_TEXT, "Just charge");
         add_button(m, y, w, bh, B_USB_CHARGE, 0);
     }
 }
 static void draw_usb_storage(void) {
     int top = content_y(), m = 20, w = gfx_w - 2 * m, land = landscape();
-    int y = top + (land ? 12 : 32);
-    gfx_text(FONT_BOLD, 26, m, y, w, C_ACCENT, "USB storage");
-    y += 42;
-    y += gfx_text_wrap(FONT_REG, 20, m, y, w, 5, C_TEXT,
-        "The SD card is now a drive on your computer. Copy your music, then eject the drive on the computer or unplug the cable.") * 25 + 10;
-    y += gfx_text_wrap(FONT_REG, 18, m, y, w, 3, C_DIM, "The drive can take a few seconds to appear. Tap Done only after ejecting.") * 22;
-    int bh = land ? 56 : 68, by = gfx_h - bh - (land ? 12 : 24);
-    gfx_rrect(m, by, w, bh, 14, C_PANEL); text_center(FONT_BOLD, 24, gfx_w / 2, by + bh / 2 - 15, C_TEXT, "Done");
+    int bh = LH(FONT_BOLD, 24) + 30; if (bh < (land ? 56 : 68)) bh = land ? 56 : 68;
+    int by = gfx_h - bh - (land ? 12 : 24), y = top + (land ? 12 : 28);
+    gfx_clip(0, 0, gfx_w, by - 8);
+    y += gfx_text_wrap(FONT_BOLD, 26, m, y, w, 1, C_ACCENT, "USB storage") * LH(FONT_BOLD, 26) + 10;
+    y += gfx_text_wrap(FONT_REG, 20, m, y, w, 6, C_TEXT,
+        "The SD card is now a drive on your computer. Copy your music, then eject the drive on the computer or unplug the cable.") * LH(FONT_REG, 20) + 10;
+    gfx_text_wrap(FONT_REG, 18, m, y, w, 4, C_DIM, "The drive can take a few seconds to appear. Tap Done only after ejecting.");
+    gfx_clip(0, 0, gfx_w, gfx_h);
+    gfx_rrect(m, by, w, bh, 14, C_PANEL); text_center(FONT_BOLD, 24, gfx_w / 2, by + bh / 2, w - 16, C_TEXT, "Done");
     add_button(m, by, w, bh, B_USB_DONE, 0);
 }
 
@@ -464,10 +562,12 @@ static void render(void) {
     }
     draw_status_bar();
     if (toast_until_ms > now_ms()) {
-        int w = gfx_text_w(FONT_BOLD, 30, toast) + 56; if (w > gfx_w - 20) w = gfx_w - 20;
-        int h = 76, y = (content_y() + content_bottom()) / 2 - h / 2;
+        int maxw = gfx_w - 60, n = gfx_text_lines(FONT_BOLD, 30, maxw, 2, toast), lh = LH(FONT_BOLD, 30);
+        int w = (n > 1 ? maxw : gfx_text_w(FONT_BOLD, 30, toast)) + 40;
+        int h = n * lh + 30, y = (content_y() + content_bottom()) / 2 - h / 2;
         gfx_rrect((gfx_w - w) / 2, y, w, h, 16, 0x343a47);
-        text_center(FONT_BOLD, 30, gfx_w / 2, y + 20, C_TEXT, toast);
+        if (n == 1) text_center(FONT_BOLD, 30, gfx_w / 2, y + h / 2, maxw, C_TEXT, toast);
+        else gfx_text_wrap(FONT_BOLD, 30, (gfx_w - w) / 2 + 20, y + 15, maxw, 2, C_TEXT, toast);
     }
     gfx_present();
     dirty = 0;
@@ -560,6 +660,8 @@ static void settings_change(int id, int d) {
     case S_MAXVOL: cfg.max_volume += d * 5; if (cfg.max_volume < 20) cfg.max_volume = 20; if (cfg.max_volume > 100) cfg.max_volume = 100;
         if (cfg.volume > cfg.max_volume) { cfg.volume = cfg.max_volume; hw_set_volume(cfg.volume); } break;
     case S_RESUME: cfg.resume_play = !cfg.resume_play; break;
+    case S_TEXTSIZE: cfg.text_size = (cfg.text_size + 1) & 3; gfx_set_text_scale(text_sizes[cfg.text_size]); break;
+    case S_VOLSTEP: cfg.vol_step = cfg.vol_step % 3 + 1; break;
     case S_AUTOROT:
         cfg.auto_rotate = !cfg.auto_rotate;
         if (cfg.auto_rotate) cfg.orientation = gfx_rotation(); else apply_rotation(cfg.orientation);
@@ -613,8 +715,8 @@ static void handle(hw_event_t *e) {
     case EV_KEY_PLAY: audio_toggle(); save_state(); dirty = 1; break;
     case EV_KEY_NEXT: audio_next(); dirty = 1; break;
     case EV_KEY_PREV: audio_prev(); dirty = 1; break;
-    case EV_VOL_UP: change_volume(+1); break;
-    case EV_VOL_DOWN: change_volume(-1); break;
+    case EV_VOL_UP: change_volume(+cfg.vol_step); break;
+    case EV_VOL_DOWN: change_volume(-cfg.vol_step); break;
     case EV_POWER_SHORT: set_screen_on(!screen_on); break;
     case EV_POWER_LONG: power_off(); break;
     case EV_TOUCH_DOWN:
@@ -696,7 +798,7 @@ int main(int argc, char **argv) {
     hw_init();
     load_state();
     hw_set_brightness(cfg.brightness); hw_set_volume(cfg.volume); hw_set_filter(cfg.filter);
-    gfx_set_rotation(cfg.orientation); update_accel_power();
+    gfx_set_rotation(cfg.orientation); gfx_set_text_scale(text_sizes[cfg.text_size]); update_accel_power();
     audio_init();
     headset = hw_headset(); battery = hw_battery(); charging = hw_charging();
     if (!is_dir_path(cfg.browse) || strncmp(cfg.browse, MUSIC_ROOT, strlen(MUSIC_ROOT))) snprintf(cfg.browse, sizeof cfg.browse, "%s", MUSIC_ROOT);

@@ -27,9 +27,14 @@ void gfx_tri(int x0, int y0, int x1, int y1, int x2, int y2, uint32_t c);
 void gfx_circle(int cx, int cy, int r, uint32_t c);
 void gfx_clip(int x, int y, int w, int h);  // restrict drawing; gfx_clip(0,0,gfx_w,gfx_h) resets
 
+// Text sizes below are scaled by the text scale (percent, default 100).
+void gfx_set_text_scale(int pct);
+int gfx_text_scale(void);
+int gfx_text_px(int px);                    // px after scaling
 int gfx_text_w(int font, int px, const char *s);
 int gfx_line_h(int font, int px);
 // Draws UTF-8 text with its top-left corner at (x, y). Truncates with an ellipsis to fit maxw (0 = no limit). Returns the width drawn.
 int gfx_text(int font, int px, int x, int y, int maxw, uint32_t c, const char *s);
 // Word-wraps into at most max_lines lines; the last line gets an ellipsis. Returns the number of lines drawn.
 int gfx_text_wrap(int font, int px, int x, int y, int maxw, int max_lines, uint32_t c, const char *s);
+int gfx_text_lines(int font, int px, int maxw, int max_lines, const char *s);  // lines gfx_text_wrap would use

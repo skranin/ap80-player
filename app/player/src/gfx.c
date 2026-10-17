@@ -162,7 +162,9 @@ static const glyph_t *glyph(int font, int px, uint32_t cp) {
             g->key = key; return g;
         }
     }
-    return &gcache[0];  // cache full: degrade gracefully
+    // cache full (e.g. after text size changes): start over
+    for (int i = 0; i < GCACHE; i++) { if (gcache[i].bmp) stbtt_FreeBitmap(gcache[i].bmp, NULL); gcache[i] = (glyph_t){ 0 }; }
+    return glyph(font, px, cp);
 }
 
 static uint32_t utf8_next(const char **s) {
@@ -173,7 +175,15 @@ static uint32_t utf8_next(const char **s) {
     *s = (const char *)p; return c;
 }
 
-int gfx_line_h(int font, int px) { (void)font; return px * 5 / 4; }
+// Every public text call scales its pixel size by text_scale percent (the "Text size" setting).
+static int text_scale = 100;
+static int sc(int px) { return px * text_scale / 100; }
+void gfx_set_text_scale(int pct) { text_scale = pct; }
+int gfx_text_scale(void) { return text_scale; }
+int gfx_text_px(int px) { return sc(px); }
+
+static int line_h_raw(int px) { return px * 5 / 4; }
+int gfx_line_h(int font, int px) { (void)font; return line_h_raw(sc(px)); }
 
 static int ascent_px(int font, int px) {
     stbtt_fontinfo *fi = &fonts[font_ok[font] ? font : 0];
@@ -184,7 +194,7 @@ static int ascent_px(int font, int px) {
 static int text_w_n(int font, int px, const char *s, const char *end) {
     int w = 0; while (*s && (!end || s < end)) w += glyph(font, px, utf8_next(&s))->adv; return w;
 }
-int gfx_text_w(int font, int px, const char *s) { return text_w_n(font, px, s, NULL); }
+int gfx_text_w(int font, int px, const char *s) { return text_w_n(font, sc(px), s, NULL); }
 
 static int draw_run(int font, int px, int x, int y, uint32_t c, const char *s, const char *end) {
     int base = y + ascent_px(font, px), x0 = x;
@@ -197,30 +207,34 @@ static int draw_run(int font, int px, int x, int y, uint32_t c, const char *s, c
     return x - x0;
 }
 
-int gfx_text(int font, int px, int x, int y, int maxw, uint32_t c, const char *s) {
-    if (!maxw || gfx_text_w(font, px, s) <= maxw) return draw_run(font, px, x, y, c, s, NULL);
-    const char *ell = "\xe2\x80\xa6"; int ew = gfx_text_w(font, px, ell), w = 0;
+static int text_raw(int font, int px, int x, int y, int maxw, uint32_t c, const char *s) {
+    if (!maxw || text_w_n(font, px, s, NULL) <= maxw) return draw_run(font, px, x, y, c, s, NULL);
+    const char *ell = "\xe2\x80\xa6"; int ew = text_w_n(font, px, ell, NULL), w = 0;
     const char *p = s, *cut = s;
     while (*p) { const char *q = p; int gw = glyph(font, px, utf8_next(&q))->adv; if (w + gw + ew > maxw) break; w += gw; p = q; cut = p; }
     int d = draw_run(font, px, x, y, c, s, cut);
     return d + draw_run(font, px, x + d, y, c, ell, NULL);
 }
+int gfx_text(int font, int px, int x, int y, int maxw, uint32_t c, const char *s) { return text_raw(font, sc(px), x, y, maxw, c, s); }
 
-int gfx_text_wrap(int font, int px, int x, int y, int maxw, int max_lines, uint32_t c, const char *s) {
-    int lines = 0, lh = gfx_line_h(font, px);
+// Word-wraps; with draw = 0 only counts the lines.
+static int wrap(int font, int px, int x, int y, int maxw, int max_lines, uint32_t c, const char *s, int draw) {
+    int lines = 0, lh = line_h_raw(px);
     while (*s && lines < max_lines) {
-        if (lines == max_lines - 1 || gfx_text_w(font, px, s) <= maxw) { gfx_text(font, px, x, y + lines * lh, maxw, c, s); return lines + 1; }
+        if (lines == max_lines - 1 || text_w_n(font, px, s, NULL) <= maxw) { if (draw) text_raw(font, px, x, y + lines * lh, maxw, c, s); return lines + 1; }
         // longest prefix that fits, preferring to break at a space
         const char *p = s, *fit = s, *space = NULL; int w = 0;
         while (*p) { const char *q = p; uint32_t cp = utf8_next(&q); int gw = glyph(font, px, cp)->adv; if (w + gw > maxw) break; w += gw; if (cp == ' ') space = p; p = q; fit = p; }
         const char *brk = space && space > s ? space : fit;
         if (brk == s) brk = fit > s ? fit : s + 1;
-        draw_run(font, px, x, y + lines * lh, c, s, brk);
+        if (draw) draw_run(font, px, x, y + lines * lh, c, s, brk);
         s = brk; while (*s == ' ') s++;
         lines++;
     }
     return lines;
 }
+int gfx_text_wrap(int font, int px, int x, int y, int maxw, int max_lines, uint32_t c, const char *s) { return wrap(font, sc(px), x, y, maxw, max_lines, c, s, 1); }
+int gfx_text_lines(int font, int px, int maxw, int max_lines, const char *s) { return wrap(font, sc(px), 0, 0, maxw, max_lines, 0, s, 0); }
 
 int gfx_init(const char *font_reg, const char *font_bold) {
     void *r = load_file(font_reg), *b = load_file(font_bold);

@@ -1,0 +1,26 @@
+# Vendor firmware images and extracted/rebuilt trees (large, not ours)
+firmware/*
+!firmware/mod/
+firmware/mod/*
+!firmware/mod/overlay/
+
+# Device NAND dumps and device info (personal, large)
+backup/
+
+# Vendor manual
+docs/*.pdf
+
+# Prebuilt third-party tools
+tools/adb28/
+
+# Build outputs and test binaries
+app/player/build/
+app/fbtest/fbtest
+app/hello/hello
+app/audiotest/*.wav
+
+# Local test SD card tree
+scratch_test/
+
+.DS_Store
+._*

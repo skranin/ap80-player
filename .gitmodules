@@ -1,0 +1,3 @@
+[submodule "app/player/third_party/tinyalsa"]
+	path = app/player/third_party/tinyalsa
+	url = https://github.com/tinyalsa/tinyalsa.git

@@ -1,0 +1,42 @@
+#!/bin/sh
+#
+# Start music player (ap80dev hook: optional dev/boot script from SD card)
+#
+
+PL01=/ui_data/player
+[ -f ${PL01} ] || PL01=/usr/bin/hiby_player.sh
+
+DEV=/mnt/sd_0/ap80dev
+
+case "$1" in
+  start)
+	echo -n "Starting $0 : begin "
+
+    # wait up to 4s for the SD card to be mounted
+    n=0
+    while [ ! -d $DEV ] && [ $n -lt 8 ]; do sleep 0.5; n=$((n+1)); done
+
+    if [ -f $DEV/boot.sh ]; then
+        ( /bin/sh $DEV/boot.sh > /tmp/ap80dev_boot.log 2>&1 & )
+    fi
+
+    if [ -f $DEV/no_stock ]; then
+        echo " ap80dev: stock player skipped"
+    else
+        [ -f $PL01 ] && ( $PL01 & ) || echo " file <$PL01> don't exist."
+    fi
+
+	echo -n "Starting $0 : end "
+	;;
+  stop)
+	echo -n "Stopping $0 : "
+	echo "OK"
+	;;
+  restart|reload)
+	;;
+  *)
+	echo "Usage: $0 {start|stop|restart}"
+	exit 1
+esac
+
+exit 0

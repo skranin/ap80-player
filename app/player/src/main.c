@@ -166,6 +166,7 @@ static long last_input_ms, toast_until_ms; static char toast[128];
 static int battery = -1, charging, headset;
 static int scroll[SCR_COUNT], content_h[SCR_COUNT];   // per-page vertical scroll (px)
 static int touch_active, touch_dragging, touch_x0, touch_y0, touch_scroll0, press_id = -1;
+static int scrub_active, scrub_x;                  // dragging the seek bar
 
 typedef struct { int x, y, w, h, id, arg; } button_t;
 static button_t buttons[128]; static int nbuttons;
@@ -320,12 +321,14 @@ static void draw_player(void) {
     draw_skip_icon(cx + gap, cy, 30, 1, C_TEXT); add_button(cx + gap - 56, cy - 44, 112, 88, B_NEXT, 0);
 
     int py = cy - r - (land ? 44 : 56);   // seek bar
-    double frac = st.dur > 0 ? st.pos / st.dur : 0; if (frac > 1) frac = 1; if (frac < 0) frac = 0;
+    double frac = st.dur > 0 ? st.pos / st.dur : 0;
+    if (scrub_active) frac = (double)(scrub_x - m) / w;   // follow the finger until release
+    if (frac > 1) frac = 1; if (frac < 0) frac = 0;
     gfx_rrect(m, py, w, 8, 4, C_LINE); gfx_rrect(m, py, (int)(w * frac), 8, 4, C_ACCENT);
-    gfx_circle(m + (int)(w * frac), py + 4, 10, C_TEXT);
+    gfx_circle(m + (int)(w * frac), py + 4, scrub_active ? 15 : 10, scrub_active ? C_ACCENT : C_TEXT);
     add_button(0, py - 20, gfx_w, 48, B_SEEK, 0);
-    char t1[16], t2[16]; fmt_time(t1, sizeof t1, st.pos); fmt_time(t2, sizeof t2, st.dur);
-    gfx_text(FONT_BOLD, 19, m, py + 16, 0, C_DIM, t1);
+    char t1[16], t2[16]; fmt_time(t1, sizeof t1, scrub_active ? frac * st.dur : st.pos); fmt_time(t2, sizeof t2, st.dur);
+    gfx_text(FONT_BOLD, 19, m, py + 16, 0, scrub_active ? C_ACCENT : C_DIM, t1);
     gfx_text(FONT_BOLD, 19, m + w - gfx_text_w(FONT_BOLD, 19, t2), py + 16, 0, C_DIM, t2);
 
     char info[96];
@@ -528,7 +531,7 @@ static void usb_leave(void) {
 static void apply_rotation(int r) {
     if (r == gfx_rotation()) return;
     gfx_set_rotation(r); dirty = 1;
-    touch_active = 0;   // a touch in progress belonged to the old layout
+    touch_active = 0; scrub_active = 0;   // a touch in progress belonged to the old layout
 }
 static void update_accel_power(void) { hw_accel_enable(cfg.auto_rotate && screen_on); }
 
@@ -618,15 +621,23 @@ static void handle(hw_event_t *e) {
         if (was_off) break;
         touch_active = 1; touch_dragging = 0; touch_x0 = e->x; touch_y0 = e->y; touch_scroll0 = scroll[screen];
         { button_t *b = hit(e->x, e->y); press_id = b ? b->id : -1; }
+        if (press_id == B_SEEK) { scrub_active = 1; scrub_x = e->x; dirty = 1; }
         break;
     case EV_TOUCH_MOVE:
         if (!touch_active) break;
+        if (scrub_active) { scrub_x = e->x; dirty = 1; last_input_ms = t; break; }
         if (!touch_dragging && abs(e->y - touch_y0) > 12) touch_dragging = 1;
         if (touch_dragging && !usb_mode && screen != SCR_PLAYER) { scroll[screen] = touch_scroll0 - (e->y - touch_y0); dirty = 1; last_input_ms = t; }
         break;
     case EV_TOUCH_UP:
         if (!touch_active) break;
         touch_active = 0; press_id = -1;
+        if (scrub_active) {   // seek to where the finger was lifted
+            scrub_active = 0;
+            audio_status_t st; audio_status(&st);
+            if (st.dur > 0) { double f = (double)(scrub_x - 20) / (gfx_w - 40); if (f < 0) f = 0; if (f > 1) f = 1; audio_seek(f * st.dur); }
+            dirty = 1; break;
+        }
         if (!touch_dragging) { button_t *b = hit(touch_x0, touch_y0); if (b) on_button(b, touch_x0); }
         dirty = 1; break;
     }

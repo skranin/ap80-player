@@ -4,7 +4,7 @@ A small replacement UI for the **Hidizs AP80 Pro-X** portable music player. It r
 HiBy player app with a simple one and keeps HiBy's Linux and drivers.
 
 The goal is a minimal player. Plug in headphones, browse the SD card by folder, and play a song or
-a whole folder. There is no Bluetooth, e-book reader, step counter or album art.
+a whole folder. There is no e-book reader, step counter or album art.
 
 > **Warning:** this project involves flashing modified firmware and running unofficial software
 > on the device. It is not affiliated with or endorsed by Hidizs or HiBy. Doing this may void your
@@ -24,8 +24,11 @@ a whole folder. There is no Bluetooth, e-book reader, step counter or album art.
   was played before.
 - **Hardware controls:** play/pause, next/prev, the volume knob, and power (short press = screen,
   long press = power off).
-- **Settings:** brightness, screen-off timeout, auto-rotate, orientation, max volume, DAC filter,
+- **Settings:** Bluetooth, text size, brightness, screen-off timeout, auto-rotate, orientation, max volume, volume step, DAC filter,
   start paused or resume, switch to the stock player, power off.
+- **Bluetooth output:** play to paired headphones, speakers or a car (A2DP; the stock BlueZ plugin
+  picks LDAC, aptX, AAC or SBC). Scan, pair, forget, and a separate volume. The headphone jack is
+  used whenever something is plugged in.
 - **USB storage mode:** exports the SD card to a computer so music can be copied over.
 
 ## How it runs on the device

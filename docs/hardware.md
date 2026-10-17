@@ -50,6 +50,13 @@ Verified on the device on 2026-10-16 with stock firmware 1.1 and the ap80dev hoo
 - Card 1 "sa_spdif": SPDIF dummy.
 - Battery: `/sys/class/power_supply/battery/{capacity,status,voltage_now}`.
 
+## Bluetooth — CSR8811 on ttyS0, BlueZ 4
+- `S40bt_init` → `/usr/bin/bt_init` starts dbus, `hciattach`, `bluetoothd` (BlueZ 4, HiBy-patched), `bt-agent`, `bt-monitor` and `bt-media` at every boot, and leaves the adapter Powered Off.
+- Pairings persist in `/data/lib/bluetooth/<adapter MAC>/` (linkkeys).
+- Tools: `bt-adapter --set Powered 1|0`, `bt-adapter -i`, `bt-device -l` (JSON after some uuid lines), `bt-device -c MAC` (pair), `-d` (disconnect), `-r` (remove), `--set MAC Trusted 1`, `hcitool scan`, `hcitool con` (cheap way to see live ACL links).
+- Audio: ALSA `pcm.NAME { type bluetooth bdaddr MAC profile a2dp }` (`libasound_module_pcm_bluetooth.so`). Opening it connects A2DP by itself if the device is reachable; the codec (LDAC/aptX/AAC/SBC) comes from `/etc/bluetooth/audio.conf`. It accepts only **S16_LE**, any rate up to 192 kHz; stream start takes 1–2 s. `BT_GET_CAPABILITIES failed: Input/output error` = device off, out of range or busy with another source.
+- ap80player writes an `.asoundrc` into a per-device HOME under `/tmp` and pipes 16-bit PCM to `aplay -D ap80bt -t raw` (software volume). `bt-monitor` reports events over HiBy's IPC, not stdout, so connection state is polled with `hcitool con`.
+
 ## Stock player behaviour
 - `strace` of `hiby_player` stalls during the library scan (it was writing to the SD card), so a future trace should log to `/tmp` and trace fewer syscalls.
 - Starting stock from adb needs `start-stop-daemon -S -b`; otherwise it gets a SIGHUP when the adb shell exits.

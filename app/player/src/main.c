@@ -5,6 +5,7 @@
 #include "hw.h"
 #include "audio.h"
 #include "usb.h"
+#include "bt.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,7 +41,8 @@ static struct {
     char browse[PATH_MAXLEN];
     char queue_root[PATH_MAXLEN]; int queue_recursive;
     char track[PATH_MAXLEN]; double pos;
-} cfg = { 25, 100, 120, 2, 0, 0, 0, ROT_PORTRAIT, 0, 1, MUSIC_ROOT, "", 0, "", 0 };
+    int bt_on, bt_volume; char bt_mac[18], bt_name[64];   // Bluetooth output; volume is per output
+} cfg = { 25, 100, 120, 2, 0, 0, 0, ROT_PORTRAIT, 0, 1, MUSIC_ROOT, "", 0, "", 0, 0, 60, "", "" };
 
 static const int timeouts[] = { 15, 30, 60, 120, 300, 0 };
 static const char *timeout_names[] = { "15 s", "30 s", "1 min", "2 min", "5 min", "Never" };
@@ -57,9 +59,9 @@ static void save_state(void) {
     if (st.has_queue) { snprintf(cfg.track, sizeof cfg.track, "%s", st.path); cfg.pos = st.pos; }
     char tmp[] = STATE_FILE ".tmp";
     FILE *f = fopen(tmp, "w"); if (!f) return;
-    fprintf(f, "volume=%d\nmax_volume=%d\nbrightness=%d\ntimeout=%d\nfilter=%d\nresume_play=%d\nauto_rotate=%d\norientation=%d\ntext_size=%d\nvol_step=%d\nbrowse=%s\nqueue_root=%s\nqueue_recursive=%d\ntrack=%s\npos=%.1f\n",
+    fprintf(f, "volume=%d\nmax_volume=%d\nbrightness=%d\ntimeout=%d\nfilter=%d\nresume_play=%d\nauto_rotate=%d\norientation=%d\ntext_size=%d\nvol_step=%d\nbrowse=%s\nqueue_root=%s\nqueue_recursive=%d\ntrack=%s\npos=%.1f\nbt_on=%d\nbt_volume=%d\nbt_mac=%s\nbt_name=%s\n",
             cfg.volume, cfg.max_volume, cfg.brightness, cfg.timeout_idx, cfg.filter, cfg.resume_play, cfg.auto_rotate, cfg.orientation, cfg.text_size, cfg.vol_step, cfg.browse,
-            cfg.queue_root, cfg.queue_recursive, cfg.track, cfg.pos);
+            cfg.queue_root, cfg.queue_recursive, cfg.track, cfg.pos, cfg.bt_on, cfg.bt_volume, cfg.bt_mac, cfg.bt_name);
     fclose(f); rename(tmp, STATE_FILE);
 }
 
@@ -84,10 +86,15 @@ static void load_state(void) {
         else if (!strcmp(line, "queue_recursive")) cfg.queue_recursive = atoi(v);
         else if (!strcmp(line, "track")) snprintf(cfg.track, sizeof cfg.track, "%s", v);
         else if (!strcmp(line, "pos")) cfg.pos = atof(v);
+        else if (!strcmp(line, "bt_on")) cfg.bt_on = atoi(v) != 0;
+        else if (!strcmp(line, "bt_volume")) cfg.bt_volume = atoi(v);
+        else if (!strcmp(line, "bt_mac")) snprintf(cfg.bt_mac, sizeof cfg.bt_mac, "%s", v);
+        else if (!strcmp(line, "bt_name")) snprintf(cfg.bt_name, sizeof cfg.bt_name, "%s", v);
     }
     fclose(f);
     if (cfg.max_volume < 10 || cfg.max_volume > 100) cfg.max_volume = 100;
     if (cfg.volume < 0) cfg.volume = 0; if (cfg.volume > cfg.max_volume) cfg.volume = cfg.max_volume;
+    if (cfg.bt_volume < 0) cfg.bt_volume = 0; if (cfg.bt_volume > cfg.max_volume) cfg.bt_volume = cfg.max_volume;
     if (cfg.brightness < 5 || cfg.brightness > 255) cfg.brightness = 120;
     if (cfg.timeout_idx < 0 || cfg.timeout_idx > 5) cfg.timeout_idx = 2;
     cfg.filter &= 7; cfg.orientation &= 3; cfg.auto_rotate = !!cfg.auto_rotate; cfg.text_size &= 3;
@@ -171,12 +178,18 @@ static int battery = -1, charging, headset;
 static int scroll[SCR_COUNT], content_h[SCR_COUNT];   // per-page vertical scroll (px)
 static int touch_active, touch_dragging, touch_x0, touch_y0, touch_scroll0, press_id = -1;
 static int scrub_active, scrub_x;                  // dragging the seek bar
+static int settings_page;                          // 0 = settings list, 1 = Bluetooth
+static bt_status_t bts;                            // latest Bluetooth status
+static int out_bt;                                 // playing to Bluetooth (else the jack)
+static int forget_armed = -1; static long forget_until;   // "Forget" needs a second tap
+static char pending_select[18];                    // use this device once pairing finishes
 
 typedef struct { int x, y, w, h, id, arg; } button_t;
 static button_t buttons[128]; static int nbuttons;
 enum { B_NONE, B_BACK_DIR, B_PLAY_ALL, B_ENTRY, B_TAB, B_PLAYPAUSE, B_NEXT, B_PREV,
-       B_SEEK, B_SET_DEC, B_SET_INC, B_SET_CYCLE, B_STOCK, B_POWEROFF, B_USB_STORAGE, B_USB_CHARGE, B_USB_DONE };
-enum { S_TEXTSIZE, S_BRIGHT, S_TIMEOUT, S_AUTOROT, S_ORIENT, S_MAXVOL, S_VOLSTEP, S_FILTER, S_RESUME };
+       B_SEEK, B_SET_DEC, B_SET_INC, B_SET_CYCLE, B_STOCK, B_POWEROFF, B_USB_STORAGE, B_USB_CHARGE, B_USB_DONE,
+       B_BT_BACK, B_BT_POWER, B_BT_DEV, B_BT_FORGET, B_BT_SCAN, B_BT_FOUND };
+enum { S_BT, S_TEXTSIZE, S_BRIGHT, S_TIMEOUT, S_AUTOROT, S_ORIENT, S_MAXVOL, S_VOLSTEP, S_FILTER, S_RESUME };
 
 static long now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000L + t.tv_nsec / 1000000; }
 static void add_button(int x, int y, int w, int h, int id, int arg) { if (nbuttons < 128) buttons[nbuttons++] = (button_t){ x, y, w, h, id, arg }; }
@@ -236,6 +249,11 @@ static int big_button(int x, int y, int w, uint32_t bg, int font, uint32_t fg, c
     return h;
 }
 
+static int bt_connected(const char *mac) {
+    for (int i = 0; i < bts.npaired; i++) if (!strcasecmp(bts.paired[i].mac, mac)) return bts.paired[i].connected;
+    return 0;
+}
+
 static void draw_status_bar(void) {
     int o = cap_scale(125), h = status_h(), cy = h / 2;
     gfx_rect(0, 0, gfx_w, h, C_PANEL);
@@ -243,7 +261,7 @@ static void draw_status_bar(void) {
     audio_status_t st; audio_status(&st);
     int x = 12;
     if (st.has_queue) { if (st.playing) draw_play_icon(x + 8, cy, 16, C_ACCENT); else draw_pause_icon(x + 8, cy, 14, C_DIM); x += 26; }
-    snprintf(s, sizeof s, "Vol %d", cfg.volume);
+    snprintf(s, sizeof s, "Vol %d", out_bt ? cfg.bt_volume : cfg.volume);
     x += gfx_text(FONT_BOLD, 19, x, vc(19, cy), 0, C_TEXT, s) + 12;
     int right = gfx_w - 12;
     if (battery >= 0) {
@@ -254,7 +272,10 @@ static void draw_status_bar(void) {
         gfx_rect(bx + 3, cy - 5, 22 * battery / 100, 10, battery <= 15 ? 0xe04848 : C_TEXT);
         right = bx - w - 16;
     }
-    if (!headset && right - x > 30) gfx_text(FONT_REG, 17, x, vc(17, cy), right - x, C_ACCENT, "no headphones");
+    if (out_bt && right - x > 30) {
+        snprintf(s, sizeof s, "BT %s", cfg.bt_name[0] ? cfg.bt_name : "headphones");
+        gfx_text(FONT_REG, 17, x, vc(17, cy), right - x, bt_connected(cfg.bt_mac) ? C_ACCENT : C_DIM, s);
+    } else if (!headset && right - x > 30) gfx_text(FONT_REG, 17, x, vc(17, cy), right - x, C_ACCENT, "no headphones");
     gfx_set_text_scale(o);
 }
 
@@ -444,11 +465,13 @@ static const char *text_size_names[] = { "Normal", "Large", "Larger", "Largest" 
 
 #define LABEL_PX 22
 #define VALUE_PX 20
+static void draw_bt_page(void);
 static void draw_settings(void) {
+    if (settings_page) { draw_bt_page(); return; }
     int top = content_y(), bot = content_bottom(), view = bot - top;
     char v[64];
     struct { const char *label; int kind, id; } rows[] = {   // kind 1 = -/+, 0 = tap to change
-        { "Text size", 0, S_TEXTSIZE }, { "Brightness", 1, S_BRIGHT }, { "Screen off after", 0, S_TIMEOUT },
+        { "Bluetooth", 0, S_BT }, { "Text size", 0, S_TEXTSIZE }, { "Brightness", 1, S_BRIGHT }, { "Screen off after", 0, S_TIMEOUT },
         { "Auto-rotate", 0, S_AUTOROT }, { "Orientation", 0, S_ORIENT }, { "Max volume", 1, S_MAXVOL }, { "Volume step", 0, S_VOLSTEP },
         { "DAC filter", 0, S_FILTER }, { "On start", 0, S_RESUME },
     };
@@ -464,6 +487,7 @@ static void draw_settings(void) {
         for (int i = 0; i < nrows; i++) {
             int dim = 0;
             switch (rows[i].id) {
+            case S_BT: snprintf(v, sizeof v, "%s \xe2\x80\xba", !cfg.bt_on ? "Off" : cfg.bt_mac[0] ? cfg.bt_name : "On"); break;
             case S_TEXTSIZE: snprintf(v, sizeof v, "%s", text_size_names[cfg.text_size]); break;
             case S_BRIGHT: snprintf(v, sizeof v, "%d%%", cfg.brightness * 100 / 255); break;
             case S_TIMEOUT: snprintf(v, sizeof v, "%s", timeout_names[cfg.timeout_idx]); break;
@@ -510,6 +534,81 @@ static void draw_settings(void) {
         if (!pass) content_h[SCR_SETTINGS] = y - y0;
     }
     gfx_clip(0, 0, gfx_w, gfx_h);
+}
+
+// ---------- Bluetooth page ----------
+// A row with a name, an optional second line, and an optional text button on the right.
+static int bt_row(int y, int pass, const char *name, const char *sub, uint32_t name_c, int id, int arg,
+                  const char *right, uint32_t right_c, int right_id) {
+    int m = 18, rw = right ? gfx_text_w(FONT_BOLD, 19, right) + 28 : 0, maxw = gfx_w - 2 * m - rw;
+    int nl = gfx_text_lines(FONT_BOLD, 22, maxw, 2, name), sl = sub ? gfx_text_lines(FONT_REG, 18, maxw, 2, sub) : 0;
+    int nlh = nl * LH(FONT_BOLD, 22), slh = sl * LH(FONT_REG, 18);
+    int rh = nlh + slh + 24; if (rh < 68) rh = 68;
+    if (pass) {
+        int ty = y + (rh - nlh - slh) / 2;
+        gfx_text_wrap(FONT_BOLD, 22, m, ty + (LH(FONT_BOLD, 22) - T(22)) / 4, maxw, 2, name_c, name);
+        if (sub) gfx_text_wrap(FONT_REG, 18, m, ty + nlh, maxw, 2, C_DIM, sub);
+        add_button(0, y, gfx_w - rw - m, rh, id, arg);
+        if (right) { text_vc(FONT_BOLD, 19, gfx_w - m - rw + 28, y + rh / 2, 0, right_c, right); add_button(gfx_w - rw - m, y, rw + m, rh, right_id, arg); }
+        gfx_rect(m, y + rh - 1, gfx_w - m, 1, C_LINE);
+    }
+    return rh;
+}
+static int bt_section(int y, int pass, const char *label) {
+    if (pass) gfx_text(FONT_BOLD, 17, 18, y + 16, gfx_w - 36, C_DIM, label);
+    return LH(FONT_BOLD, 17) + 22;
+}
+static int bt_note(int y, int pass, uint32_t c, const char *text) {
+    int w = gfx_w - 36, n = gfx_text_lines(FONT_REG, 18, w, 6, text);
+    if (pass) gfx_text_wrap(FONT_REG, 18, 18, y + 12, w, 6, c, text);
+    return n * LH(FONT_REG, 18) + 20;
+}
+
+static void draw_bt_page(void) {
+    int top = content_y(), bot = content_bottom(), m = 18;
+    int hh = LH(FONT_BOLD, 24) + 26; if (hh < 60) hh = 60;
+    int ly = top + hh, view = bot - ly, y0 = ly, y = y0;
+    long t = now_ms();
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass) { finish_scroll(SCR_SETTINGS, ly, view); gfx_clip(0, ly, gfx_w - 8, view); }
+        y = y0 = ly - scroll[SCR_SETTINGS];
+        y += bt_row(y, pass, "Bluetooth", NULL, C_TEXT, B_BT_POWER, 0, cfg.bt_on ? "On" : "Off", cfg.bt_on ? C_ACCENT : C_DIM, B_BT_POWER);
+        if (!cfg.bt_on) y += bt_note(y, pass, C_DIM, "Turn on to play to Bluetooth headphones, speakers or a car.");
+        else if (!bts.powered) y += bt_note(y, pass, C_DIM, "Turning on\xe2\x80\xa6");
+        else {
+            y += bt_section(y, pass, "Paired devices");
+            for (int i = 0; i < bts.npaired; i++) {
+                bt_dev_t *d = &bts.paired[i];
+                int sel = !strcasecmp(d->mac, cfg.bt_mac), armed = forget_armed == i && t < forget_until;
+                const char *sub = sel ? (d->connected ? (headset ? "Connected \xc2\xb7 headphone jack in use" : "Connected \xc2\xb7 playing here")
+                                                      : "Connects when you press play")
+                                      : (d->connected ? "Connected \xc2\xb7 tap to use" : "Tap to use");
+                y += bt_row(y, pass, d->name, sub, sel ? C_ACCENT : C_TEXT, B_BT_DEV, i,
+                            armed ? "Forget?" : "Forget", armed ? 0xff6a6a : C_DIM, B_BT_FORGET);
+            }
+            if (!bts.npaired) y += bt_note(y, pass, C_DIM, "No paired devices yet.");
+            y += 14;
+            y += big_button(m, y, gfx_w - 2 * m, C_PANEL, FONT_REG, bts.scanning ? C_DIM : C_TEXT,
+                            bts.scanning ? "Scanning\xe2\x80\xa6" : "Scan for new devices", bts.scanning ? B_NONE : B_BT_SCAN, pass) + 6;
+            if (bts.nfound) {
+                y += bt_section(y, pass, "Found \xc2\xb7 tap to pair");
+                for (int i = 0; i < bts.nfound; i++) {
+                    bt_dev_t *d = &bts.found[i];
+                    y += bt_row(y, pass, d->name, !strcasecmp(bts.pairing, d->mac) ? "Pairing\xe2\x80\xa6" : d->mac, C_TEXT, B_BT_FOUND, i, NULL, 0, 0);
+                }
+            }
+            if (bts.msg[0]) y += bt_note(y, pass, 0xff6a6a, bts.msg);
+            y += bt_note(y, pass, C_DIM, "To add headphones, put them in pairing mode and scan. The headphone jack is used whenever something is plugged into it.");
+        }
+        y += 10;
+        if (!pass) content_h[SCR_SETTINGS] = y - y0;
+    }
+    gfx_clip(0, 0, gfx_w, gfx_h);
+    // header last, so it wins over rows scrolled under it
+    gfx_rect(0, top, gfx_w, hh, C_BG);
+    draw_chevron_left(14, top + hh / 2, 26, C_ACCENT, C_BG); add_button(0, top, 120, hh, B_BT_BACK, 0);
+    text_vc(FONT_BOLD, 24, 52, top + hh / 2, gfx_w - 66, C_TEXT, "Bluetooth");
+    gfx_rect(0, top + hh - 1, gfx_w, 1, C_LINE);
 }
 
 static void draw_usb_prompt(void) {
@@ -585,8 +684,9 @@ static void set_screen_on(int on) {
     update_accel_power();
 }
 static void change_volume(int d) {
-    int v = cfg.volume + d; if (v < 0) v = 0; if (v > cfg.max_volume) v = cfg.max_volume;
-    cfg.volume = v; hw_set_volume(v);
+    int *pv = out_bt ? &cfg.bt_volume : &cfg.volume;
+    int v = *pv + d; if (v < 0) v = 0; if (v > cfg.max_volume) v = cfg.max_volume;
+    *pv = v; if (out_bt) audio_set_soft_volume(v); else hw_set_volume(v);
     char s[32]; snprintf(s, sizeof s, v ? "Volume %d" : "Muted", v); if (screen_on) show_toast(s);
 }
 static void enter_dir(const char *dir) { snprintf(cfg.browse, sizeof cfg.browse, "%s", dir); lib_load(cfg.browse); scroll[SCR_LIBRARY] = 0; dirty = 1; }
@@ -652,13 +752,86 @@ static void auto_rotate_tick(long t) {
     if (t - cand_since >= 700) { apply_rotation(r); cand = -1; }
 }
 
+// ---------- Bluetooth ----------
+// Bluetooth is the output when it is on, a device is chosen and nothing is plugged into the jack.
+static void update_output(void) {
+    static char cur[18] = "?";
+    int want = cfg.bt_on && cfg.bt_mac[0] && !headset;
+    const char *mac = want ? cfg.bt_mac : "";
+    if (!strcmp(cur, mac)) return;
+    snprintf(cur, sizeof cur, "%s", mac);
+    out_bt = want; audio_set_bluetooth(mac); dirty = 1;
+}
+static void bt_select(const char *mac, const char *name) {
+    snprintf(cfg.bt_mac, sizeof cfg.bt_mac, "%s", mac ? mac : "");
+    snprintf(cfg.bt_name, sizeof cfg.bt_name, "%s", name ? name : "");
+    update_output(); save_state(); dirty = 1;
+}
+static void bt_tick(void) {
+    static int seen = -1;
+    int g = bt_gen(); if (g == seen) return;
+    seen = g;
+    bt_status_t prev = bts; bt_status(&bts); dirty = 1;
+    if (pending_select[0] && !bts.pairing[0]) {   // pairing finished
+        const char *name = bt_name(&bts, pending_select);
+        if (name) bt_select(pending_select, name);
+        pending_select[0] = 0;
+    }
+    // A paired device that connects by itself (headphones switched on, the car) becomes the output.
+    for (int i = 0; i < bts.npaired; i++) {
+        bt_dev_t *d = &bts.paired[i];
+        if (!d->connected || !strcasecmp(d->mac, cfg.bt_mac)) continue;
+        int was = 0;
+        for (int j = 0; j < prev.npaired; j++) if (!strcasecmp(prev.paired[j].mac, d->mac)) was = prev.paired[j].connected;
+        if (!was) { bt_select(d->mac, d->name); char s[96]; snprintf(s, sizeof s, "%s connected", d->name); if (screen_on) show_toast(s); }
+    }
+    const char *name = cfg.bt_mac[0] ? bt_name(&bts, cfg.bt_mac) : NULL;
+    if (name && strcmp(name, cfg.bt_name)) { snprintf(cfg.bt_name, sizeof cfg.bt_name, "%s", name); save_state(); }
+}
+static void bt_button(button_t *b) {
+    audio_status_t st;
+    switch (b->id) {
+    case B_BT_BACK: settings_page = 0; scroll[SCR_SETTINGS] = 0; break;
+    case B_BT_POWER:
+        cfg.bt_on = !cfg.bt_on; bt_set_power(cfg.bt_on);
+        if (!cfg.bt_on && out_bt) audio_pause();
+        update_output(); save_state(); break;
+    case B_BT_DEV:
+        if (b->arg < 0 || b->arg >= bts.npaired) break;
+        if (!strcasecmp(bts.paired[b->arg].mac, cfg.bt_mac)) {   // tap the chosen device again: back to the jack
+            if (out_bt) audio_pause();
+            bt_disconnect(cfg.bt_mac); bt_select(NULL, NULL);
+        } else {
+            bt_select(bts.paired[b->arg].mac, bts.paired[b->arg].name);
+            audio_status(&st);
+            if (!st.playing && !bts.paired[b->arg].connected) bt_connect(cfg.bt_mac);
+        }
+        break;
+    case B_BT_FORGET:
+        if (b->arg < 0 || b->arg >= bts.npaired) break;
+        if (forget_armed == b->arg && now_ms() < forget_until) {
+            if (!strcasecmp(bts.paired[b->arg].mac, cfg.bt_mac)) { if (out_bt) audio_pause(); bt_select(NULL, NULL); }
+            bt_forget(bts.paired[b->arg].mac); forget_armed = -1;
+        } else { forget_armed = b->arg; forget_until = now_ms() + 3000; }
+        break;
+    case B_BT_SCAN: bt_scan(); break;
+    case B_BT_FOUND:
+        if (b->arg < 0 || b->arg >= bts.nfound || bts.pairing[0]) break;
+        snprintf(pending_select, sizeof pending_select, "%s", bts.found[b->arg].mac);
+        bt_pair(pending_select); break;
+    }
+    if (b->id != B_BT_FORGET) forget_armed = -1;
+    dirty = 1;
+}
+
 static void settings_change(int id, int d) {
     switch (id) {
     case S_BRIGHT: cfg.brightness += d * 20; if (cfg.brightness < 10) cfg.brightness = 10; if (cfg.brightness > 255) cfg.brightness = 255; hw_set_brightness(cfg.brightness); break;
     case S_TIMEOUT: cfg.timeout_idx = (cfg.timeout_idx + 1) % 6; break;
     case S_FILTER: cfg.filter = (cfg.filter + 1) & 7; hw_set_filter(cfg.filter); break;
     case S_MAXVOL: cfg.max_volume += d * 5; if (cfg.max_volume < 20) cfg.max_volume = 20; if (cfg.max_volume > 100) cfg.max_volume = 100;
-        if (cfg.volume > cfg.max_volume) { cfg.volume = cfg.max_volume; hw_set_volume(cfg.volume); } break;
+        if (cfg.volume > cfg.max_volume) { cfg.volume = cfg.max_volume; hw_set_volume(cfg.volume); }
+        if (cfg.bt_volume > cfg.max_volume) { cfg.bt_volume = cfg.max_volume; audio_set_soft_volume(cfg.bt_volume); } break;
     case S_RESUME: cfg.resume_play = !cfg.resume_play; break;
     case S_TEXTSIZE: cfg.text_size = (cfg.text_size + 1) & 3; gfx_set_text_scale(text_sizes[cfg.text_size]); break;
     case S_VOLSTEP: cfg.vol_step = cfg.vol_step % 3 + 1; break;
@@ -667,6 +840,7 @@ static void settings_change(int id, int d) {
         if (cfg.auto_rotate) cfg.orientation = gfx_rotation(); else apply_rotation(cfg.orientation);
         update_accel_power(); break;
     case S_ORIENT: cfg.orientation = (cfg.orientation + 1) & 3; apply_rotation(cfg.orientation); break;
+    case S_BT: settings_page = 1; scroll[SCR_SETTINGS] = 0; forget_armed = -1; break;
     }
     save_state(); dirty = 1;
 }
@@ -678,7 +852,9 @@ static void on_button(button_t *b, int tx) {
         char p[PATH_MAXLEN]; snprintf(p, sizeof p, "%s", cfg.browse); char *s = strrchr(p, '/');
         if (s && s > p && strcmp(cfg.browse, MUSIC_ROOT)) { *s = 0; if (strlen(p) < strlen(MUSIC_ROOT)) snprintf(p, sizeof p, "%s", MUSIC_ROOT); enter_dir(p); }
         break; }
-    case B_TAB: screen = b->arg; dirty = 1; break;
+    case B_TAB:
+        if (b->arg == SCR_SETTINGS && screen == SCR_SETTINGS && settings_page) { settings_page = 0; scroll[SCR_SETTINGS] = 0; }
+        screen = b->arg; dirty = 1; break;
     case B_PLAY_ALL:
         if (start_queue(cfg.browse, 1, NULL, 0, 1)) show_toast("No music here");
         else { screen = SCR_PLAYER; save_state(); }
@@ -703,6 +879,7 @@ static void on_button(button_t *b, int tx) {
     case B_USB_STORAGE: usb_enter(); break;
     case B_USB_CHARGE: usb_mode = 0; usb_prompt_done = 1; dirty = 1; break;
     case B_USB_DONE: usb_leave(); break;
+    case B_BT_BACK: case B_BT_POWER: case B_BT_DEV: case B_BT_FORGET: case B_BT_SCAN: case B_BT_FOUND: bt_button(b); break;
     }
 }
 
@@ -797,10 +974,11 @@ int main(int argc, char **argv) {
     if (gfx_init(fr, fb)) return 1;
     hw_init();
     load_state();
-    hw_set_brightness(cfg.brightness); hw_set_volume(cfg.volume); hw_set_filter(cfg.filter);
+    hw_set_brightness(cfg.brightness); hw_set_volume(cfg.volume); hw_set_filter(cfg.filter); audio_set_soft_volume(cfg.bt_volume);
     gfx_set_rotation(cfg.orientation); gfx_set_text_scale(text_sizes[cfg.text_size]); update_accel_power();
     audio_init();
     headset = hw_headset(); battery = hw_battery(); charging = hw_charging();
+    bt_init(cfg.bt_on); update_output();
     if (!is_dir_path(cfg.browse) || strncmp(cfg.browse, MUSIC_ROOT, strlen(MUSIC_ROOT))) snprintf(cfg.browse, sizeof cfg.browse, "%s", MUSIC_ROOT);
     lib_load(cfg.browse);
     // Resume: open the player if something was played before, otherwise the library.
@@ -831,6 +1009,7 @@ int main(int argc, char **argv) {
                 handle(&ev[j]);
             }
         }
+        bt_tick();
         if (hw_power_check_long()) { hw_event_t e = { EV_POWER_LONG, 0, 0 }; handle(&e); }
         long t = now_ms();
         static long last_acc;
@@ -838,7 +1017,8 @@ int main(int argc, char **argv) {
         if (t - last_tick >= 500) {
             last_tick = t;
             int hs = hw_headset();
-            if (hs != headset) { headset = hs; dirty = 1; if (!hs) { audio_pause(); show_toast("Headphones unplugged"); } }
+            if (hs != headset) { headset = hs; dirty = 1; if (!hs) { audio_pause(); show_toast("Headphones unplugged"); } update_output(); }
+            if (forget_armed >= 0 && t > forget_until) { forget_armed = -1; dirty = 1; }
             if (usb_mode == 2) { if (usb_storage_done()) usb_leave(); }
             else if (!usb_power()) { usb_prompt_done = 0; if (usb_mode == 1) { usb_mode = 0; dirty = 1; } }
             else if (!usb_mode && !usb_prompt_done && usb_host_connected()) { usb_mode = 1; set_screen_on(1); last_input_ms = t; dirty = 1; }

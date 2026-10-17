@@ -1,5 +1,6 @@
 #include "audio.h"
 #include "hw.h"
+#include "bt.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,7 +8,11 @@
 #include <stdint.h>
 #include <time.h>
 #include <unistd.h>
+#include <errno.h>
 #include <pthread.h>
+#include <math.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <tinyalsa/asoundlib.h>
 
 #define DR_FLAC_IMPLEMENTATION
@@ -35,6 +40,9 @@ static int playing, quit, load_pending, autoplay_after_load;
 static double load_pos = 0, want_seek = -1;
 static dec_t dec; static int dec_open;
 static struct pcm *pcm; static unsigned pcm_rate;
+static char bt_want[18], bt_out[18];        // Bluetooth device to play to ("" = jack), device of the open stream
+static pid_t bt_pid; static int bt_fd = -1; static int bt_gain = 65536;   // software volume, 16.16
+static int err_output;                      // err came from the output, cleared once it plays again
 static int amp_on; static time_t last_active;
 static char err[128];
 
@@ -161,18 +169,53 @@ static void dec_seek(dec_t *d, uint64_t frame) {
 }
 
 // ---------- output ----------
-static void pcm_release(void) { if (pcm) { pcm_close(pcm); pcm = NULL; } }
-static int pcm_ensure(unsigned rate) {
-    if (pcm && pcm_rate == rate) return 0;
+// The headphone jack goes through tinyalsa (hw:0,0, 24-bit). Bluetooth goes to an aplay process on the
+// BlueZ ALSA plugin, which accepts only 16-bit; the pipe to it paces us.
+static void pcm_release(void) {
+    if (pcm) { pcm_close(pcm); pcm = NULL; }
+    if (bt_fd >= 0) {
+        kill(bt_pid, SIGTERM); close(bt_fd); bt_fd = -1;
+        int st; waitpid(bt_pid, &st, 0);
+    }
+}
+static int pcm_ensure(unsigned rate, const char *bt) {
+    if ((pcm || bt_fd >= 0) && pcm_rate == rate && !strcmp(bt, bt_out)) return 0;
     pcm_release();
+    if (bt[0]) {
+        if (amp_on) { hw_set_output(0); amp_on = 0; }
+        bt_pid = bt_aplay(bt, rate, &bt_fd);
+        if (bt_pid < 0) { bt_fd = -1; snprintf(err, sizeof err, "Bluetooth output error"); err_output = 1; return -1; }
+        snprintf(bt_out, sizeof bt_out, "%s", bt); pcm_rate = rate; return 0;
+    }
+    bt_out[0] = 0;
     if (!amp_on) { hw_set_output(1); amp_on = 1; usleep(30000); }
     struct pcm_config cfg = { .channels = 2, .rate = rate, .period_size = PERIOD_FRAMES, .period_count = PERIOD_COUNT, .format = PCM_FORMAT_S24_LE };
     pcm = pcm_open(0, 0, PCM_OUT, &cfg);
     if (!pcm || !pcm_is_ready(pcm)) {
         snprintf(err, sizeof err, "Audio output error: %s", pcm ? pcm_get_error(pcm) : "open");
-        fprintf(stderr, "%s\n", err); pcm_release(); return -1;
+        fprintf(stderr, "%s\n", err); err_output = 1; pcm_release(); return -1;
     }
     pcm_rate = rate; return 0;
+}
+static int out_write(int32_t *buf, int n) {
+    if (pcm) {
+        if (pcm_writei(pcm, buf, n) >= 0) return 0;
+        fprintf(stderr, "pcm_writei: %s\n", pcm_get_error(pcm)); pcm_release(); return 0;   // reopened on the next period
+    }
+    static int16_t s16[PERIOD_FRAMES * 2];
+    int g = bt_gain;
+    for (int i = 0; i < n * 2; i++) {
+        int64_t v = ((int64_t)buf[i] * g) >> 24;            // 24-bit sample -> 16-bit, with volume
+        s16[i] = v > 32767 ? 32767 : v < -32768 ? -32768 : (int16_t)v;
+    }
+    const char *p = (const char *)s16; int left = n * 4;
+    while (left > 0) {
+        int k = write(bt_fd, p, left);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) { pcm_release(); return -1; }            // aplay quit: the device is gone or out of reach
+        p += k; left -= k;
+    }
+    return 0;
 }
 
 // ---------- worker ----------
@@ -196,26 +239,30 @@ static void *worker(void *arg) {
                 if (ap && qi + 1 < qn) { qi++; load_pos = 0; load_pending = 1; autoplay_after_load = 1; }
                 else playing = 0;
             } else if (load_pending) { dec_close(&nd); }   // superseded while opening
-            else { dec = nd; dec_open = 1; playing = ap; err[0] = 0; }
+            else { dec = nd; dec_open = 1; playing = ap; err[0] = 0; err_output = 0; }
             free(path);
             continue;
         }
         if (want_seek >= 0 && dec_open) { dec_seek(&dec, (uint64_t)(want_seek * dec.rate)); want_seek = -1; }
         if (!playing || !dec_open) {
-            if (pcm) { pthread_mutex_unlock(&lk); pcm_release(); pthread_mutex_lock(&lk); last_active = mono_s(); }
+            if (pcm || bt_fd >= 0) { pthread_mutex_unlock(&lk); pcm_release(); pthread_mutex_lock(&lk); last_active = mono_s(); }
             if (!load_pending && want_seek < 0 && !quit && !(playing && dec_open)) pthread_cond_wait(&cv, &lk);
             continue;
         }
-        unsigned rate = dec.rate;
+        unsigned rate = dec.rate; char bt[18]; snprintf(bt, sizeof bt, "%s", bt_want);
         pthread_mutex_unlock(&lk);
-        int n = 0, ok = pcm_ensure(rate) == 0;
+        int n = 0, ok = pcm_ensure(rate, bt) == 0;
         if (ok) {
             n = dec_read(&dec, buf, PERIOD_FRAMES);
-            if (n > 0 && pcm_writei(pcm, buf, n) < 0) { fprintf(stderr, "pcm_writei: %s\n", pcm_get_error(pcm)); pcm_release(); }
+            if (n > 0 && out_write(buf, n)) ok = 0;
         }
         pthread_mutex_lock(&lk);
         last_active = mono_s();
-        if (!ok) { playing = 0; continue; }
+        if (!ok) {
+            if (!err_output) { snprintf(err, sizeof err, "Bluetooth device not reachable"); err_output = 1; }
+            playing = 0; continue;
+        }
+        if (err_output) { err[0] = 0; err_output = 0; }
         if (n <= 0 && !load_pending && want_seek < 0) {          // end of track
             if (qi + 1 < qn) { qi++; load_pos = 0; load_pending = 1; autoplay_after_load = 1; }
             else { playing = 0; load_pos = 0; load_pending = 1; autoplay_after_load = 0; }  // end of queue: rewind, stop
@@ -272,7 +319,7 @@ void audio_seek(double sec) {
 }
 
 int audio_files_closed(void) {
-    pthread_mutex_lock(&lk); int c = !dec_open && !load_pending && !pcm; pthread_mutex_unlock(&lk); return c;
+    pthread_mutex_lock(&lk); int c = !dec_open && !load_pending && !pcm && bt_fd < 0; pthread_mutex_unlock(&lk); return c;
 }
 
 int audio_idle_seconds(void) {
@@ -295,6 +342,14 @@ void audio_status(audio_status_t *st) {
     } else st->pos = load_pos;
     snprintf(st->error, sizeof st->error, "%s", err);
     pthread_mutex_unlock(&lk);
+}
+
+void audio_set_bluetooth(const char *mac) {
+    pthread_mutex_lock(&lk); snprintf(bt_want, sizeof bt_want, "%s", mac ? mac : ""); pthread_cond_signal(&cv); pthread_mutex_unlock(&lk);
+}
+void audio_set_soft_volume(int vol) {
+    if (vol < 0) vol = 0; if (vol > 100) vol = 100;
+    bt_gain = vol ? (int)(65536.0 * pow(10.0, -(100 - vol) * 0.8 / 20.0)) : 0;   // same curve as the DAC
 }
 
 void audio_amp_off(void) {

@@ -53,7 +53,7 @@ Hardware: 360×480 touch screen, volume knob, physical buttons, Ingenic X1000, 2
 - [ ] OTG / USB audio output to an external DAC
 
 ## Extra apps
-- [ ] FM radio (scan, presets, sensitivity) — may not work on this hardware
+- [ ] FM radio (scan, presets, sensitivity) — not supported: no FM tuner on I2C and no driver on this hardware
 - [ ] Pedometer / step counter (sensitivity, date, reset)
 - [ ] E-book reader (`/book`: bookmarks, favorites, recents, page turn by key)
 - [ ] Gallery / screensaver (album cover, dynamic cover, photos in `/screensavers`)

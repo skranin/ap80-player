@@ -27,3 +27,5 @@ int audio_idle_seconds(void);           // seconds since output was last active,
 void audio_amp_off(void);               // power the headphone amp down if nothing is playing
 int audio_files_closed(void);           // 1 when no track file is open (safe to unmount the SD card)
 int audio_is_audio_file(const char *name);
+void audio_set_bluetooth(const char *mac);   // play to this Bluetooth device, or to the jack when NULL / ""
+void audio_set_soft_volume(int vol);         // Bluetooth volume 0..100 (the jack uses the DAC volume)

@@ -6,6 +6,11 @@ HiBy player app with a simple one and keeps HiBy's Linux and drivers.
 The goal is a minimal player. Plug in headphones, browse the SD card by folder, and play a song or
 a whole folder. There is no Bluetooth, e-book reader, step counter or album art.
 
+> **Warning:** this project involves flashing modified firmware and running unofficial software
+> on the device. It is not affiliated with or endorsed by Hidizs or HiBy. Doing this may void your
+> warranty, and it can brick the device or lose data on the SD card. You do it at your own risk.
+> Make a full NAND backup first.
+
 ## What it does
 - **Library:** a folder browser for the SD card. Tap a song to play it and the rest of its folder;
   "Play all" plays the folder recursively.
@@ -71,3 +76,13 @@ While the app runs it reads commands from `/tmp/ap80p.cmd` on the device:
   only turns the backlight off.
 - Avoid hard resets while the SD card is mounted. One unclean reset wiped the `ap80dev` folder.
 - To return to stock, remove `ap80dev/no_stock`, or flash the stock or rollback `.upt`.
+
+## License
+The code in this repo is MIT-licensed; see `LICENSE`. Third-party components keep their own
+licenses:
+- dr_flac, dr_mp3 and dr_wav: public domain or MIT-0
+- stb_truetype: public domain or MIT
+- tinyalsa: BSD-3-Clause; a git submodule
+- DejaVu fonts: the Bitstream Vera / DejaVu license
+
+Hidizs and HiBy firmware isn't included.

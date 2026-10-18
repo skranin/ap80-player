@@ -15,6 +15,8 @@ tools/adb28/
 
 # Build outputs and test binaries
 app/player/build/
+app/player/third_party/ffmpeg/
+app/player/third_party/ffmpeg-dl/
 app/fbtest/fbtest
 app/hello/hello
 app/audiotest/*.wav

@@ -1,6 +1,7 @@
 #include "audio.h"
 #include "hw.h"
 #include "bt.h"
+#include "ffdec.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,11 +26,11 @@
 #define PERIOD_FRAMES 2048
 #define PERIOD_COUNT 4
 
-enum { DEC_NONE, DEC_FLAC, DEC_MP3, DEC_WAV };
+enum { DEC_NONE, DEC_FLAC, DEC_MP3, DEC_WAV, DEC_FF };
 typedef struct {
-    int kind; drflac *flac; drmp3 mp3; drwav wav;
+    int kind; drflac *flac; drmp3 mp3; drwav wav; ffdec_t *ff;
     unsigned rate, ch, bits; uint64_t total, pos;
-    char title[256], artist[256], album[256];
+    char title[256], artist[256], album[256], codec[16];
 } dec_t;
 
 static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
@@ -50,7 +51,11 @@ static long mono_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t)
 
 int audio_is_audio_file(const char *n) {
     const char *e = strrchr(n, '.'); if (!e) return 0;
-    return !strcasecmp(e, ".flac") || !strcasecmp(e, ".mp3") || !strcasecmp(e, ".wav");
+    static const char *exts[] = { ".flac", ".mp3", ".wav",   // built-in decoders; the rest go through FFmpeg
+        ".m4a", ".m4b", ".mp4", ".aac", ".alac", ".ogg", ".oga", ".opus", ".ape", ".wv", ".tta", ".tak",
+        ".aif", ".aiff", ".aifc", ".wma", ".dsf", ".dff", ".mpc", ".mka", ".caf", ".w64", ".mp2", NULL };
+    for (int i = 0; exts[i]; i++) if (!strcasecmp(e, exts[i])) return 1;
+    return 0;
 }
 
 // ---------- tags ----------
@@ -126,6 +131,7 @@ static void dec_close(dec_t *d) {
     if (d->kind == DEC_FLAC) drflac_close(d->flac);
     else if (d->kind == DEC_MP3) drmp3_uninit(&d->mp3);
     else if (d->kind == DEC_WAV) drwav_uninit(&d->wav);
+    else if (d->kind == DEC_FF) ffdec_close(d->ff);
     d->kind = DEC_NONE;
 }
 static int dec_open_file(dec_t *d, const char *path) {
@@ -142,7 +148,13 @@ static int dec_open_file(dec_t *d, const char *path) {
     } else if (!strcasecmp(e, ".wav")) {
         if (!drwav_init_file(&d->wav, path, NULL)) return -1;
         d->kind = DEC_WAV; d->rate = d->wav.sampleRate; d->ch = d->wav.channels; d->bits = d->wav.bitsPerSample; d->total = d->wav.totalPCMFrameCount;
-    } else return -1;
+    } else {
+        ffdec_info_t in;
+        if (!(d->ff = ffdec_open(path, &in))) return -1;
+        d->kind = DEC_FF; d->rate = in.rate; d->ch = in.ch; d->bits = in.bits; d->total = in.total;
+        memcpy(d->title, in.title, 256); memcpy(d->artist, in.artist, 256); memcpy(d->album, in.album, 256);
+        snprintf(d->codec, sizeof d->codec, "%s", in.codec);
+    }
     if (!d->ch || !d->rate) { dec_close(d); return -1; }
     return 0;
 }
@@ -150,6 +162,7 @@ static int dec_open_file(dec_t *d, const char *path) {
 static int dec_read(dec_t *d, int32_t *out, int n) {
     static int32_t tmp[PERIOD_FRAMES * 8]; static int16_t tmp16[PERIOD_FRAMES * 8];
     unsigned ch = d->ch > 8 ? 8 : d->ch; uint64_t got = 0;
+    if (d->kind == DEC_FF) { int k = ffdec_read(d->ff, out, n); d->pos += k; return k; }   // already stereo S24
     if (d->kind == DEC_FLAC) got = drflac_read_pcm_frames_s32(d->flac, n, tmp);
     else if (d->kind == DEC_WAV) got = drwav_read_pcm_frames_s32(&d->wav, n, tmp);
     else if (d->kind == DEC_MP3) { got = drmp3_read_pcm_frames_s16(&d->mp3, n, tmp16); for (uint64_t i = 0; i < got * ch; i++) tmp[i] = (int32_t)tmp16[i] << 16; }
@@ -160,11 +173,12 @@ static int dec_read(dec_t *d, int32_t *out, int n) {
     d->pos += got; return (int)got;
 }
 static void dec_seek(dec_t *d, uint64_t frame) {
-    if (frame > d->total) frame = d->total;
+    if (d->total && frame > d->total) frame = d->total;
     int ok = 0;
     if (d->kind == DEC_FLAC) ok = drflac_seek_to_pcm_frame(d->flac, frame);
     else if (d->kind == DEC_MP3) ok = drmp3_seek_to_pcm_frame(&d->mp3, frame);
     else if (d->kind == DEC_WAV) ok = drwav_seek_to_pcm_frame(&d->wav, frame);
+    else if (d->kind == DEC_FF) ok = !ffdec_seek(d->ff, frame);
     if (ok) d->pos = frame;
 }
 
@@ -338,7 +352,7 @@ void audio_status(audio_status_t *st) {
         st->rate = dec.rate; st->bits = dec.bits; st->channels = dec.ch;
         snprintf(st->title, sizeof st->title, "%s", dec.title); snprintf(st->artist, sizeof st->artist, "%s", dec.artist);
         snprintf(st->album, sizeof st->album, "%s", dec.album);
-        snprintf(st->format, sizeof st->format, "%s", dec.kind == DEC_FLAC ? "FLAC" : dec.kind == DEC_MP3 ? "MP3" : "WAV");
+        snprintf(st->format, sizeof st->format, "%s", dec.kind == DEC_FLAC ? "FLAC" : dec.kind == DEC_MP3 ? "MP3" : dec.kind == DEC_WAV ? "WAV" : dec.codec);
     } else st->pos = load_pos;
     snprintf(st->error, sizeof st->error, "%s", err);
     pthread_mutex_unlock(&lk);

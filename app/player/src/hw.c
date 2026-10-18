@@ -117,7 +117,10 @@ int hw_charging(void) {
     if (f) { if (!fgets(s, sizeof s, f)) s[0] = 0; fclose(f); }
     return !strncmp(s, "Charging", 8) || !strncmp(s, "Full", 4);
 }
-int hw_headset(void) { return read_int("/sys/class/switch/headset/state", 0) != 0; }
+int hw_headset(void) {
+    if (getenv("AP80_FAKE_HEADSET")) return 1;   // for the qemu preview, which has no headset switch
+    return read_int("/sys/class/switch/headset/state", 0) != 0;
+}
 
 // ---------- accelerometer ----------
 // The kx126 driver's event stream is unusable here (it waits for a data-ready interrupt that never

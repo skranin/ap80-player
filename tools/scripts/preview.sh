@@ -12,7 +12,7 @@ c() { echo "$1" > /tmp/ap80p.cmd; sleep 1; }
 for r in 0 1; do
   c "rot $r"; W=360; H=480; [ $r = 1 ] && { W=480; H=360; }
   T=$((H - 40))                                     # tray row
-  c "tap $((W/2)) $T"; c "shot /tmp/shots/t${S}_library_r$r.ppm"
+  c "tap $((W/6)) $T"; c "shot /tmp/shots/t${S}_library_r$r.ppm"
   c "tap $((W/2)) $((34 + 60 + 70 + 35))"; c "shot /tmp/shots/t${S}_folder_r$r.ppm"   # first folder row
   c "tap 100 $PA"; c "shot /tmp/shots/t${S}_player_r$r.ppm"         # Play all
   c "tap $((W*5/6)) $T"; c "shot /tmp/shots/t${S}_settings_r$r.ppm"

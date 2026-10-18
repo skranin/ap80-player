@@ -49,16 +49,18 @@ a whole folder. Large, readable type; no album art, e-book reader or step counte
   the jack; unplugging it pauses.
 
 ### Interface
-- **Tray** with big Player / Library / Settings buttons, and a status line with play state, volume,
+- **Tray** with big Library / Player / Settings buttons, and a status line with play state, volume,
   output and battery.
 - **Text size:** Normal, Large, Larger or Largest. Long names wrap instead of being cut off.
 - **Portrait or landscape**, either way up: a fixed orientation or phone-style **auto-rotate**.
 - **Smooth scrolling** lists, toasts for volume and events.
+- **Auto power off** after a set time with nothing playing and no buttons or screen touched.
 - **Hardware controls:** play/pause, next/prev, the volume knob (1, 2 or 3 steps per click), and
   power (short press = screen on/off, long press = power off).
 
 ### Settings
-Bluetooth, text size, brightness, screen-off timeout, auto-rotate, orientation, max volume, volume
+Bluetooth, text size, brightness, screen-off timeout, auto power off (5 min to 1 hour, or never;
+10 min by default), auto-rotate, orientation, max volume, volume
 step, DAC filter, start paused or resume playing, USB storage, switch to the stock player, power off.
 
 ### USB

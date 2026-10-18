@@ -1,6 +1,6 @@
 // ap80player: a simple music player UI for the Hidizs AP80 Pro-X.
 // Layout: status line on top, the selected page in the middle, and a tray with
-// Player / Library / Settings at the bottom. Works in portrait and landscape.
+// Library / Player / Settings at the bottom. Works in portrait and landscape.
 #include "gfx.h"
 #include "hw.h"
 #include "audio.h"
@@ -42,10 +42,13 @@ static struct {
     char queue_root[PATH_MAXLEN]; int queue_recursive;
     char track[PATH_MAXLEN]; double pos;
     int bt_on, bt_volume; char bt_mac[18], bt_name[64];   // Bluetooth output; volume is per output
-} cfg = { 25, 100, 120, 2, 0, 0, 0, ROT_PORTRAIT, 0, 1, MUSIC_ROOT, "", 0, "", 0, 0, 60, "", "" };
+    int autooff_idx;                                     // index into autooff_min
+} cfg = { 25, 100, 120, 2, 0, 0, 0, ROT_PORTRAIT, 0, 1, MUSIC_ROOT, "", 0, "", 0, 0, 60, "", "", 1 };
 
 static const int timeouts[] = { 15, 30, 60, 120, 300, 0 };
 static const char *timeout_names[] = { "15 s", "30 s", "1 min", "2 min", "5 min", "Never" };
+static const int autooff_min[] = { 5, 10, 15, 30, 60, 0 };   // power off after this long with nothing played or touched
+static const char *autooff_names[] = { "5 min", "10 min", "15 min", "30 min", "1 hour", "Never" };
 static const char *orient_names[] = { "Portrait", "Landscape", "Portrait, upside down", "Landscape, flipped" };
 static const char *filter_names[] = { "Linear phase fast", "Linear phase slow", "Minimum phase fast", "Minimum phase slow",
                                       "Apodizing fast", "Apodizing slow", "Corrected min. fast", "Brick wall" };
@@ -59,9 +62,9 @@ static void save_state(void) {
     if (st.has_queue) { snprintf(cfg.track, sizeof cfg.track, "%s", st.path); cfg.pos = st.pos; }
     char tmp[] = STATE_FILE ".tmp";
     FILE *f = fopen(tmp, "w"); if (!f) return;
-    fprintf(f, "volume=%d\nmax_volume=%d\nbrightness=%d\ntimeout=%d\nfilter=%d\nresume_play=%d\nauto_rotate=%d\norientation=%d\ntext_size=%d\nvol_step=%d\nbrowse=%s\nqueue_root=%s\nqueue_recursive=%d\ntrack=%s\npos=%.1f\nbt_on=%d\nbt_volume=%d\nbt_mac=%s\nbt_name=%s\n",
+    fprintf(f, "volume=%d\nmax_volume=%d\nbrightness=%d\ntimeout=%d\nfilter=%d\nresume_play=%d\nauto_rotate=%d\norientation=%d\ntext_size=%d\nvol_step=%d\nbrowse=%s\nqueue_root=%s\nqueue_recursive=%d\ntrack=%s\npos=%.1f\nbt_on=%d\nbt_volume=%d\nbt_mac=%s\nbt_name=%s\nauto_off=%d\n",
             cfg.volume, cfg.max_volume, cfg.brightness, cfg.timeout_idx, cfg.filter, cfg.resume_play, cfg.auto_rotate, cfg.orientation, cfg.text_size, cfg.vol_step, cfg.browse,
-            cfg.queue_root, cfg.queue_recursive, cfg.track, cfg.pos, cfg.bt_on, cfg.bt_volume, cfg.bt_mac, cfg.bt_name);
+            cfg.queue_root, cfg.queue_recursive, cfg.track, cfg.pos, cfg.bt_on, cfg.bt_volume, cfg.bt_mac, cfg.bt_name, cfg.autooff_idx);
     fclose(f); rename(tmp, STATE_FILE);
 }
 
@@ -90,6 +93,7 @@ static void load_state(void) {
         else if (!strcmp(line, "bt_volume")) cfg.bt_volume = atoi(v);
         else if (!strcmp(line, "bt_mac")) snprintf(cfg.bt_mac, sizeof cfg.bt_mac, "%s", v);
         else if (!strcmp(line, "bt_name")) snprintf(cfg.bt_name, sizeof cfg.bt_name, "%s", v);
+        else if (!strcmp(line, "auto_off")) cfg.autooff_idx = atoi(v);
     }
     fclose(f);
     if (cfg.max_volume < 10 || cfg.max_volume > 100) cfg.max_volume = 100;
@@ -97,6 +101,7 @@ static void load_state(void) {
     if (cfg.bt_volume < 0) cfg.bt_volume = 0; if (cfg.bt_volume > cfg.max_volume) cfg.bt_volume = cfg.max_volume;
     if (cfg.brightness < 5 || cfg.brightness > 255) cfg.brightness = 120;
     if (cfg.timeout_idx < 0 || cfg.timeout_idx > 5) cfg.timeout_idx = 2;
+    if (cfg.autooff_idx < 0 || cfg.autooff_idx > 5) cfg.autooff_idx = 1;
     cfg.filter &= 7; cfg.orientation &= 3; cfg.auto_rotate = !!cfg.auto_rotate; cfg.text_size &= 3;
     if (cfg.vol_step < 1 || cfg.vol_step > 3) cfg.vol_step = 1;
 }
@@ -170,7 +175,7 @@ static int start_queue(const char *root_in, int recursive, const char *track, do
 }
 
 // ---------- UI state ----------
-enum { SCR_PLAYER, SCR_LIBRARY, SCR_SETTINGS, SCR_COUNT };
+enum { SCR_LIBRARY, SCR_PLAYER, SCR_SETTINGS, SCR_COUNT };   // also the order of the tray buttons
 static int screen = SCR_LIBRARY;
 static int screen_on = 1, dirty = 1;
 static long last_input_ms, toast_until_ms; static char toast[128];
@@ -189,7 +194,7 @@ static button_t buttons[128]; static int nbuttons;
 enum { B_NONE, B_BACK_DIR, B_PLAY_ALL, B_ENTRY, B_TAB, B_PLAYPAUSE, B_NEXT, B_PREV,
        B_SEEK, B_SET_DEC, B_SET_INC, B_SET_CYCLE, B_STOCK, B_POWEROFF, B_USB_STORAGE, B_USB_CHARGE, B_USB_DONE,
        B_BT_BACK, B_BT_POWER, B_BT_DEV, B_BT_FORGET, B_BT_SCAN, B_BT_FOUND };
-enum { S_BT, S_TEXTSIZE, S_BRIGHT, S_TIMEOUT, S_AUTOROT, S_ORIENT, S_MAXVOL, S_VOLSTEP, S_FILTER, S_RESUME };
+enum { S_BT, S_TEXTSIZE, S_BRIGHT, S_TIMEOUT, S_AUTOOFF, S_AUTOROT, S_ORIENT, S_MAXVOL, S_VOLSTEP, S_FILTER, S_RESUME };
 
 static long now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000L + t.tv_nsec / 1000000; }
 static void add_button(int x, int y, int w, int h, int id, int arg) { if (nbuttons < 128) buttons[nbuttons++] = (button_t){ x, y, w, h, id, arg }; }
@@ -279,13 +284,13 @@ static void draw_status_bar(void) {
     gfx_set_text_scale(o);
 }
 
-// Bottom tray: Player / Library / Settings.
+// Bottom tray: Library / Player / Settings.
 static void draw_tray(void) {
     int o = cap_scale(125);
     int th = tray_h(), y = gfx_h - th, w = gfx_w / 3, lh = LH(FONT_BOLD, 19);
     gfx_rect(0, y, gfx_w, th, C_PANEL);
     gfx_rect(0, y, gfx_w, 1, C_LINE);
-    static const char *labels[] = { "Player", "Library", "Settings" };
+    static const char *labels[] = { "Library", "Player", "Settings" };
     for (int i = 0; i < 3; i++) {
         int x = i * w, active = screen == i, cx = x + w / 2;
         uint32_t c = active ? C_ACCENT : C_DIM;
@@ -471,7 +476,7 @@ static void draw_settings(void) {
     int top = content_y(), bot = content_bottom(), view = bot - top;
     char v[64];
     struct { const char *label; int kind, id; } rows[] = {   // kind 1 = -/+, 0 = tap to change
-        { "Bluetooth", 0, S_BT }, { "Text size", 0, S_TEXTSIZE }, { "Brightness", 1, S_BRIGHT }, { "Screen off after", 0, S_TIMEOUT },
+        { "Bluetooth", 0, S_BT }, { "Text size", 0, S_TEXTSIZE }, { "Brightness", 1, S_BRIGHT }, { "Screen off after", 0, S_TIMEOUT }, { "Auto power off", 0, S_AUTOOFF },
         { "Auto-rotate", 0, S_AUTOROT }, { "Orientation", 0, S_ORIENT }, { "Max volume", 1, S_MAXVOL }, { "Volume step", 0, S_VOLSTEP },
         { "DAC filter", 0, S_FILTER }, { "On start", 0, S_RESUME },
     };
@@ -491,6 +496,7 @@ static void draw_settings(void) {
             case S_TEXTSIZE: snprintf(v, sizeof v, "%s", text_size_names[cfg.text_size]); break;
             case S_BRIGHT: snprintf(v, sizeof v, "%d%%", cfg.brightness * 100 / 255); break;
             case S_TIMEOUT: snprintf(v, sizeof v, "%s", timeout_names[cfg.timeout_idx]); break;
+            case S_AUTOOFF: snprintf(v, sizeof v, "%s", autooff_names[cfg.autooff_idx]); break;
             case S_AUTOROT: snprintf(v, sizeof v, "%s", cfg.auto_rotate ? "On" : "Off"); break;
             case S_ORIENT: snprintf(v, sizeof v, "%s", orient_names[cfg.auto_rotate ? gfx_rotation() : cfg.orientation]); dim = cfg.auto_rotate; break;
             case S_FILTER: snprintf(v, sizeof v, "%s", filter_names[cfg.filter]); break;
@@ -720,6 +726,7 @@ static void usb_leave(void) {
     char msg[128];
     int rc = usb_storage_exit(msg, sizeof msg);
     usb_mode = 0; usb_prompt_done = 1; dirty = 1;
+    last_input_ms = now_ms();   // restart the auto power off timer
     if (rc) { show_toast(msg); return; }
     if (!is_dir_path(cfg.browse)) snprintf(cfg.browse, sizeof cfg.browse, "%s", MUSIC_ROOT);
     lib_load(cfg.browse); scroll[SCR_LIBRARY] = 0;
@@ -828,6 +835,7 @@ static void settings_change(int id, int d) {
     switch (id) {
     case S_BRIGHT: cfg.brightness += d * 20; if (cfg.brightness < 10) cfg.brightness = 10; if (cfg.brightness > 255) cfg.brightness = 255; hw_set_brightness(cfg.brightness); break;
     case S_TIMEOUT: cfg.timeout_idx = (cfg.timeout_idx + 1) % 6; break;
+    case S_AUTOOFF: cfg.autooff_idx = (cfg.autooff_idx + 1) % 6; break;
     case S_FILTER: cfg.filter = (cfg.filter + 1) & 7; hw_set_filter(cfg.filter); break;
     case S_MAXVOL: cfg.max_volume += d * 5; if (cfg.max_volume < 20) cfg.max_volume = 20; if (cfg.max_volume > 100) cfg.max_volume = 100;
         if (cfg.volume > cfg.max_volume) { cfg.volume = cfg.max_volume; hw_set_volume(cfg.volume); }
@@ -993,7 +1001,7 @@ int main(int argc, char **argv) {
     last_input_ms = now_ms();
 
     int in_fds[8], nin = hw_input_fds(in_fds, 8);
-    long last_tick = 0, last_save = now_ms(); int last_index = -1, last_playing = -1;
+    long last_tick = 0, last_save = now_ms(), last_play_ms = now_ms(); int last_index = -1, last_playing = -1;
     for (;;) {
         struct pollfd pf[10]; int n = 0;
         for (int i = 0; i < nin; i++) pf[n++] = (struct pollfd){ in_fds[i], POLLIN, 0 };
@@ -1024,7 +1032,10 @@ int main(int argc, char **argv) {
             else if (!usb_mode && !usb_prompt_done && usb_host_connected()) { usb_mode = 1; set_screen_on(1); last_input_ms = t; dirty = 1; }
             static int bat_tick; if (++bat_tick >= 60) { bat_tick = 0; battery = hw_battery(); charging = hw_charging(); dirty = 1; }
             audio_status_t st; audio_status(&st);
-            if (st.playing) dirty = 1;
+            if (st.playing) { dirty = 1; last_play_ms = t; }
+            int off = autooff_min[cfg.autooff_idx];
+            long idle_ms = t - (last_input_ms > last_play_ms ? last_input_ms : last_play_ms);
+            if (off && !usb_mode && !touch_active && idle_ms > off * 60000L) power_off();
             if (st.index != last_index || st.playing != last_playing) { last_index = st.index; last_playing = st.playing; dirty = 1; if (st.has_queue) save_state(); }
             if (st.playing && t - last_save > 15000) { last_save = t; save_state(); }
             int idle = audio_idle_seconds(); if (idle > 30) audio_amp_off();

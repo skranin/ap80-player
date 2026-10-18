@@ -9,8 +9,8 @@ a whole folder. Large, readable type; no album art, e-book reader or step counte
 <table>
   <tr>
     <td><img src="docs/img/player.png" width="240" alt="Player playing over Bluetooth"></td>
-    <td><img src="docs/img/library_albums.png" width="240" alt="Library: albums"></td>
-    <td><img src="docs/img/library_tracks.png" width="240" alt="Library: tracks of an album"></td>
+    <td><img src="docs/img/library_albums.png" width="240" alt="Library: folders"></td>
+    <td><img src="docs/img/library_tracks.png" width="240" alt="Library: tracks of a folder"></td>
   </tr>
   <tr>
     <td><img src="docs/img/settings.png" width="240" alt="Settings"></td>
